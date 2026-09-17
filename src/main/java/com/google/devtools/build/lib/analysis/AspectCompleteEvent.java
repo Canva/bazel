@@ -23,8 +23,10 @@ import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.CompletionContext;
 import com.google.devtools.build.lib.actions.EventReportingArtifacts;
 import com.google.devtools.build.lib.analysis.TopLevelArtifactHelper.ArtifactsInOutputGroup;
+import com.google.devtools.build.lib.buildeventstream.BuildEvent.LocalFile;
 import com.google.devtools.build.lib.buildeventstream.BuildEventContext;
 import com.google.devtools.build.lib.buildeventstream.BuildEventIdUtil;
+import com.google.devtools.build.lib.buildeventstream.BuildEventProtocolOptions;
 import com.google.devtools.build.lib.buildeventstream.BuildEventProtocolOptions.OutputGroupFileModes;
 import com.google.devtools.build.lib.buildeventstream.BuildEventStreamProtos;
 import com.google.devtools.build.lib.buildeventstream.BuildEventStreamProtos.BuildEventId;
@@ -163,6 +165,12 @@ public final class AspectCompleteEvent
         artifactOutputGroups,
         completionContext,
         outputGroupFileModes);
+  }
+
+  @Override
+  public Collection<LocalFile> referencedLocalFiles(BuildEventProtocolOptions options) {
+    return TargetCompleteEvent.referencedLocalFiles(
+        artifactOutputGroups, completionContext, options);
   }
 
   @Override

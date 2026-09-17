@@ -1007,6 +1007,7 @@ java_test(
     name = "TargetCompleteEventTest",
     srcs = ["TargetCompleteEventTest.java"],
     deps = [
+        "//src/main/java/com/google/devtools/common/options",
         "//src/main/java/com/google/devtools/build/lib/actions",
         "//src/main/java/com/google/devtools/build/lib/actions:artifacts",
         "//src/main/java/com/google/devtools/build/lib/actions:file_metadata",

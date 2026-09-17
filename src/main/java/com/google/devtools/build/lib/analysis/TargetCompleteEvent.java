@@ -41,6 +41,7 @@ import com.google.devtools.build.lib.buildeventstream.BuildEvent.LocalFile.Local
 import com.google.devtools.build.lib.buildeventstream.BuildEventContext;
 import com.google.devtools.build.lib.buildeventstream.BuildEventContext.OutputGroupFileMode;
 import com.google.devtools.build.lib.buildeventstream.BuildEventIdUtil;
+import com.google.devtools.build.lib.buildeventstream.BuildEventProtocolOptions;
 import com.google.devtools.build.lib.buildeventstream.BuildEventProtocolOptions.OutputGroupFileModes;
 import com.google.devtools.build.lib.buildeventstream.BuildEventStreamProtos;
 import com.google.devtools.build.lib.buildeventstream.BuildEventStreamProtos.BuildEventId;
@@ -238,6 +239,11 @@ public final class TargetCompleteEvent
   }
 
   public Iterable<Artifact> getLegacyFilteredImportantArtifacts() {
+    return getLegacyFilteredImportantArtifacts(outputs);
+  }
+
+  private static Iterable<Artifact> getLegacyFilteredImportantArtifacts(
+      ImmutableMap<String, ArtifactsInOutputGroup> outputs) {
     // TODO(ulfjack): This duplicates code in ArtifactsToBuild.
     NestedSetBuilder<Artifact> builder = NestedSetBuilder.stableOrder();
     for (ArtifactsInOutputGroup artifactsInOutputGroup : outputs.values()) {
@@ -398,28 +404,72 @@ public final class TargetCompleteEvent
 
   @Override
   public ImmutableList<LocalFile> referencedLocalFiles() {
-    ImmutableList.Builder<LocalFile> builder = ImmutableList.builder();
+    // Without knowing the options, any important output may end up with a URI in the proto.
+    ImmutableList.Builder<Artifact> artifacts = ImmutableList.builder();
     for (ArtifactsInOutputGroup group : outputs.values()) {
       if (group.areImportant()) {
-        completionContext.visitArtifacts(
-            filterFilesets(group.getArtifacts().toList()),
-            new ArtifactReceiver() {
-              @Override
-              public void accept(Artifact artifact, FileArtifactValue metadata) {
-                builder.add(
-                    new LocalFile(
-                        completionContext.pathResolver().toPath(artifact),
-                        LocalFileType.forArtifact(artifact, metadata),
-                        metadata));
-              }
-
-              @Override
-              public void acceptFilesetMapping(Artifact fileset, FilesetOutputSymlink link) {
-                throw new IllegalStateException(fileset + " should have been filtered out");
-              }
-            });
+        artifacts.addAll(group.getArtifacts().toList());
       }
     }
+    return toLocalFiles(completionContext, artifacts.build());
+  }
+
+  @Override
+  public ImmutableList<LocalFile> referencedLocalFiles(BuildEventProtocolOptions options) {
+    return referencedLocalFiles(outputs, completionContext, options);
+  }
+
+  /**
+   * Returns the files whose URIs {@link #asStreamProto} emits under the given options, mirroring
+   * {@link #toOutputGroupProtos} and the deprecated {@code important_output} field.
+   *
+   * <p>URIs are only emitted for output groups in {@link OutputGroupFileMode#INLINE_ONLY} or
+   * {@link OutputGroupFileMode#BOTH} mode and, if enabled, for the legacy important outputs. The
+   * files of output groups reported as named sets are referenced by the corresponding {@code
+   * NamedSetOfFiles} events instead, which also take care of uploading them. Not referencing them
+   * here again avoids processing every file once per target that transitively contains it, which
+   * is what dominates BEP upload work and memory on large builds.
+   */
+  static ImmutableList<LocalFile> referencedLocalFiles(
+      ImmutableMap<String, ArtifactsInOutputGroup> outputs,
+      CompletionContext completionContext,
+      BuildEventProtocolOptions options) {
+    OutputGroupFileModes fileModes = options.getOutputGroupFileModesMapping();
+    ImmutableSet.Builder<Artifact> artifacts = ImmutableSet.builder();
+    if (options.getLegacyImportantOutputs()) {
+      artifacts.addAll(getLegacyFilteredImportantArtifacts(outputs));
+    }
+    for (var entry : outputs.entrySet()) {
+      ArtifactsInOutputGroup group = entry.getValue();
+      OutputGroupFileMode mode = fileModes.getMode(entry.getKey());
+      if (group.areImportant()
+          && (mode == OutputGroupFileMode.INLINE_ONLY || mode == OutputGroupFileMode.BOTH)) {
+        artifacts.addAll(group.getArtifacts().toList());
+      }
+    }
+    return toLocalFiles(completionContext, artifacts.build());
+  }
+
+  private static ImmutableList<LocalFile> toLocalFiles(
+      CompletionContext completionContext, Iterable<Artifact> artifacts) {
+    ImmutableList.Builder<LocalFile> builder = ImmutableList.builder();
+    completionContext.visitArtifacts(
+        filterFilesets(artifacts),
+        new ArtifactReceiver() {
+          @Override
+          public void accept(Artifact artifact, FileArtifactValue metadata) {
+            builder.add(
+                new LocalFile(
+                    completionContext.pathResolver().toPath(artifact),
+                    LocalFileType.forArtifact(artifact, metadata),
+                    metadata));
+          }
+
+          @Override
+          public void acceptFilesetMapping(Artifact fileset, FilesetOutputSymlink link) {
+            throw new IllegalStateException(fileset + " should have been filtered out");
+          }
+        });
     return builder.build();
   }
 

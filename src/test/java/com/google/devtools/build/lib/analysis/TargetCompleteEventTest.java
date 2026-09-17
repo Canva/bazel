@@ -34,12 +34,14 @@ import com.google.devtools.build.lib.analysis.config.BuildConfigurationValue;
 import com.google.devtools.build.lib.analysis.util.AnalysisTestCase;
 import com.google.devtools.build.lib.buildeventstream.BuildEvent.LocalFile;
 import com.google.devtools.build.lib.buildeventstream.BuildEvent.LocalFile.LocalFileType;
+import com.google.devtools.build.lib.buildeventstream.BuildEventProtocolOptions;
 import com.google.devtools.build.lib.buildeventstream.BuildEventStreamProtos.File;
 import com.google.devtools.build.lib.skyframe.ConfiguredTargetAndData;
 import com.google.devtools.build.lib.skyframe.TreeArtifactValue;
 import com.google.devtools.build.lib.util.OS;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.devtools.build.lib.vfs.Root;
+import com.google.devtools.common.options.Options;
 import java.util.Map;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -183,6 +185,100 @@ public class TargetCompleteEventTest extends AnalysisTestCase {
   }
 
   /** Regression test for b/165671166. */
+  @Test
+  public void referencedLocalFilesWithOptions_defaultOptions_referencesNoFiles() throws Exception {
+    // With the default options, files are only reported through NamedSetOfFiles events, which
+    // reference (and upload) them themselves.
+    TargetCompleteEvent event = eventForFilegroupWithSourceAndGeneratedFile();
+
+    assertThat(event.referencedLocalFiles(bepOptions())).isEmpty();
+    // The option-less variant still returns every important artifact.
+    assertThat(event.referencedLocalFiles()).hasSize(2);
+  }
+
+  @Test
+  public void referencedLocalFilesWithOptions_legacyImportantOutputs_referencesNonSourceFiles()
+      throws Exception {
+    TargetCompleteEvent event = eventForFilegroupWithSourceAndGeneratedFile();
+    BuildEventProtocolOptions options = bepOptions("--legacy_important_outputs");
+
+    // Source artifacts are not part of the deprecated important_output field.
+    assertThat(event.referencedLocalFiles(options))
+        .containsExactly(localFile(event, "out.txt", LocalFileType.OUTPUT_FILE));
+  }
+
+  @Test
+  public void referencedLocalFilesWithOptions_inlineOnly_referencesAllFiles() throws Exception {
+    TargetCompleteEvent event = eventForFilegroupWithSourceAndGeneratedFile();
+    BuildEventProtocolOptions options =
+        bepOptions("--experimental_build_event_output_group_mode=default=inline_only");
+
+    assertThat(event.referencedLocalFiles(options))
+        .containsExactlyElementsIn(event.referencedLocalFiles());
+  }
+
+  @Test
+  public void referencedLocalFilesWithOptions_both_referencesAllFiles() throws Exception {
+    TargetCompleteEvent event = eventForFilegroupWithSourceAndGeneratedFile();
+    BuildEventProtocolOptions options =
+        bepOptions(
+            "--legacy_important_outputs",
+            "--experimental_build_event_output_group_mode=default=both");
+
+    // Files referenced both as legacy important outputs and inline are listed once.
+    assertThat(event.referencedLocalFiles(options))
+        .containsExactlyElementsIn(event.referencedLocalFiles());
+  }
+
+  @Test
+  public void referencedLocalFilesWithOptions_otherOutputGroupInline_referencesNoFiles()
+      throws Exception {
+    TargetCompleteEvent event = eventForFilegroupWithSourceAndGeneratedFile();
+    BuildEventProtocolOptions options =
+        bepOptions("--experimental_build_event_output_group_mode=other_group=inline_only");
+
+    assertThat(event.referencedLocalFiles(options)).isEmpty();
+  }
+
+  /**
+   * Returns the completion event of a filegroup whose default output group contains a source file
+   * and a generated file, with metadata for both.
+   */
+  private TargetCompleteEvent eventForFilegroupWithSourceAndGeneratedFile() throws Exception {
+    scratch.file(
+        "BUILD",
+        "genrule(name = 'gen', outs = ['out.txt'], cmd = 'touch $@')",
+        "filegroup(name = 'files', srcs = ['file', ':gen'])");
+    scratch.file("file", "content does not matter");
+    ConfiguredTargetAndData ctAndData = getCtAndData("//:files");
+    ArtifactsToBuild artifactsToBuild = getArtifactsToBuild(ctAndData);
+    ImmutableMap.Builder<Artifact, FileArtifactValue> metadata = ImmutableMap.builder();
+    for (Artifact artifact : artifactsToBuild.getAllArtifacts().toList()) {
+      metadata.put(artifact, FileArtifactValue.createForNormalFile(new byte[] {1, 2, 3}, null, 10));
+    }
+    CompletionContext completionContext =
+        getCompletionContext(metadata.buildOrThrow(), ImmutableMap.of());
+    return TargetCompleteEvent.successfulBuild(
+        ctAndData,
+        completionContext,
+        artifactsToBuild.getAllArtifactsByOutputGroup(),
+        /* announceTargetSummary= */ false);
+  }
+
+  private static BuildEventProtocolOptions bepOptions(String... flags) throws Exception {
+    return Options.parse(BuildEventProtocolOptions.class, flags).getOptions();
+  }
+
+  private static LocalFile localFile(
+      TargetCompleteEvent event, String baseName, LocalFileType type) {
+    for (LocalFile file : event.referencedLocalFiles()) {
+      if (file.path.getBaseName().equals(baseName)) {
+        return new LocalFile(file.path, type, file.artifactMetadata);
+      }
+    }
+    throw new AssertionError("no referenced file named " + baseName);
+  }
+
   @Test
   public void testFileProtoFromArtifactReencodesAsUtf8() throws Exception {
     if (OS.getCurrent() == OS.WINDOWS) {
