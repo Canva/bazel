@@ -107,9 +107,12 @@ final class ConfiguredAspectProducer
         continue;
       }
       configuredAspects.add(value);
-      if (transitiveState.storeTransitivePackages()) {
+      // A cached aspect value carries no transitive packages; see
+      // ConfiguredTargetAndDataProducer for why, and why skipping is the behaviour that matches.
+      var aspectPackages = value.getTransitivePackages();
+      if (transitiveState.storeTransitivePackages() && aspectPackages != null) {
         transitiveState.updateTransitivePackages(
-            value.getKeyForTransitivePackageTracking(), value.getTransitivePackages());
+            value.getKeyForTransitivePackageTracking(), aspectPackages);
       }
     }
     try {

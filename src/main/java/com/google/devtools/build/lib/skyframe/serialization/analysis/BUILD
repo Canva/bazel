@@ -224,6 +224,7 @@ java_library(
     srcs = ["FileDependencySerializer.java"],
     visibility = [
         "//src/test/java/com/google/devtools/build/lib/skyframe/serialization/analysis:__pkg__",
+        "//src/main/java/com/google/devtools/build/lib/skycache:__pkg__",
     ],
     deps = [
         ":file_dependency_key_support",
@@ -371,6 +372,7 @@ java_library(
         "//src/main/java/com/google/devtools/build/lib/analysis:__pkg__",
         "//src/main/java/com/google/devtools/build/lib/buildtool:__pkg__",
         "//src/main/java/com/google/devtools/build/lib/runtime/commands:__pkg__",
+        "//src/main/java/com/google/devtools/build/lib/skycache:__pkg__",
         "//src/main/java/com/google/devtools/build/lib/skyframe:__pkg__",
         "//src/main/java/com/google/devtools/build/lib/skyframe/serialization:__pkg__",
         "//src/test/java/com/google/devtools/build/lib/skyframe:__pkg__",
@@ -389,6 +391,7 @@ java_library(
         "//src/main/java/com/google/devtools/build/lib/analysis:__pkg__",
         "//src/main/java/com/google/devtools/build/lib/buildtool:__pkg__",
         "//src/main/java/com/google/devtools/build/lib/runtime/commands:__pkg__",
+        "//src/main/java/com/google/devtools/build/lib/skycache:__pkg__",
         "//src/main/java/com/google/devtools/build/lib/skyframe:__pkg__",
         "//src/main/java/com/google/devtools/build/lib/skyframe/serialization:__pkg__",
         "//src/test/java/com/google/devtools/build/lib/runtime:__subpackages__",
@@ -412,6 +415,7 @@ java_library(
         "//src/main/java/com/google/devtools/build/lib/analysis:__pkg__",
         "//src/main/java/com/google/devtools/build/lib/buildtool:__pkg__",
         "//src/main/java/com/google/devtools/build/lib/runtime/commands:__pkg__",
+        "//src/main/java/com/google/devtools/build/lib/skycache:__pkg__",
         "//src/main/java/com/google/devtools/build/lib/skyframe:__pkg__",
         "//src/main/java/com/google/devtools/build/lib/skyframe/serialization:__pkg__",
         "//src/test/java/com/google/devtools/build/lib/runtime:__subpackages__",
@@ -443,6 +447,7 @@ java_library(
     visibility = [
         "//src/main/java/com/google/devtools/build/lib/buildtool:__pkg__",
         "//src/main/java/com/google/devtools/build/lib/runtime:__subpackages__",
+        "//src/main/java/com/google/devtools/build/lib/skycache:__pkg__",
         "//src/main/java/com/google/devtools/build/lib/skyframe:__subpackages__",
         "//src/test/java/com/google/devtools/build/lib/runtime:__subpackages__",
         "//src/test/java/com/google/devtools/build/lib/skyframe:__subpackages__",
@@ -481,6 +486,7 @@ java_library(
         "LookupTopLevelTargetsResult.java",
     ],
     visibility = [
+        "//src/main/java/com/google/devtools/build/lib/skycache:__pkg__",
         "//src/main/java/com/google/devtools/build/lib/skyframe/serialization:__pkg__",
         "//src/test/java/com/google/devtools/build/lib/skyframe/serialization:__pkg__",
         "//src/test/java/com/google/devtools/build/lib/skyframe/serialization/analysis:__pkg__",
@@ -497,6 +503,7 @@ java_library(
     visibility = [
         "//src/main/java/com/google/devtools/build/lib/buildtool:__pkg__",
         "//src/main/java/com/google/devtools/build/lib/metrics:__pkg__",
+        "//src/main/java/com/google/devtools/build/lib/skycache:__pkg__",
         "//src/main/java/com/google/devtools/build/lib/skyframe:__pkg__",
         "//src/main/java/com/google/devtools/build/lib/skyframe/serialization:__pkg__",
         "//src/test/java/com/google/devtools/build/lib/metrics:__pkg__",
@@ -537,6 +544,7 @@ java_library(
         "//src/main/java/com/google/devtools/build/lib/buildtool:__pkg__",
         "//src/main/java/com/google/devtools/build/lib/metrics:__pkg__",
         "//src/main/java/com/google/devtools/build/lib/runtime:__subpackages__",
+        "//src/main/java/com/google/devtools/build/lib/skycache:__pkg__",
         "//src/main/java/com/google/devtools/build/lib/skyframe/serialization:__pkg__",
         "//src/test/java/com/google/devtools/build/lib/metrics:__pkg__",
         "//src/test/java/com/google/devtools/build/lib/runtime:__subpackages__",

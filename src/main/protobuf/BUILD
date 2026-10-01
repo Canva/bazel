@@ -26,6 +26,7 @@ FILES = [
     "execution_graph",
     "execution_graph_writer",
     "file_invalidation_data",
+    "analysis_cache",
 ]
 
 [proto_library(
@@ -195,6 +196,12 @@ cc_proto_library(
 cc_proto_library(
     name = "worker_protocol_cc_proto",
     deps = [":worker_protocol_proto"],
+)
+
+java_grpc_library(
+    name = "analysis_cache_java_grpc",
+    srcs = [":analysis_cache_proto"],
+    deps = [":analysis_cache_java_proto"],
 )
 
 java_grpc_library(

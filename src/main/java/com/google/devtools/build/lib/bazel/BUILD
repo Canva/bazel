@@ -245,6 +245,7 @@ java_library(
         "//src/main/java/com/google/devtools/build/lib/sandbox:sandbox_module",
         "//src/main/java/com/google/devtools/build/lib/shell:windows_subprocess_factory",
         "//src/main/java/com/google/devtools/build/lib/skyframe:skymeld_module",
+        "//src/main/java/com/google/devtools/build/lib/skycache",
         "//src/main/java/com/google/devtools/build/lib/skyframe/serialization:serialization_module",
         "//src/main/java/com/google/devtools/build/lib/standalone",
         "//src/main/java/com/google/devtools/build/lib/starlarkdebug/module",

@@ -934,14 +934,20 @@ final class AspectFunction implements SkyFunction {
       return null;
     }
 
-    NestedSet<Package.Metadata> transitivePackages =
-        storeTransitivePackages
-            ? NestedSetBuilder.<Package.Metadata>stableOrder()
-                .add(originalTarget.getPackageMetadata())
-                .addTransitive(transitiveState.transitivePackages())
-                .addTransitive(real.getTransitivePackages())
-                .build()
-            : null;
+    // `real` may be a cached value, whose transitive packages are null; see
+    // ConfiguredTargetAndDataProducer. Omit rather than crash.
+    NestedSet<Package.Metadata> transitivePackages = null;
+    if (storeTransitivePackages) {
+      var builder =
+          NestedSetBuilder.<Package.Metadata>stableOrder()
+              .add(originalTarget.getPackageMetadata())
+              .addTransitive(transitiveState.transitivePackages());
+      var realPackages = real.getTransitivePackages();
+      if (realPackages != null) {
+        builder.addTransitive(realPackages);
+      }
+      transitivePackages = builder.build();
+    }
 
     analysisProgressReceiver.doneConfigureAspect();
     return AspectValue.createForAlias(

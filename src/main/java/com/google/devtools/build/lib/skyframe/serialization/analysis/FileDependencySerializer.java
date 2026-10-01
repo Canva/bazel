@@ -108,7 +108,26 @@ import javax.annotation.Nullable;
  * Records {@link FileKey}, {@link DirectoryListingKey} or {@link AbstractNestedFileOpNodes}
  * invalidation to a remote {@link KeyValueWriter}.
  */
-final class FileDependencySerializer {
+public final class FileDependencySerializer {
+
+  /**
+   * Treats an absolute symlink as an unresolvable leaf instead of crashing.
+   *
+   * <p>Analysis caching assumes an execroot free of absolute symlinks. An open-source output base
+   * is not: every repository served from the repository contents cache is reached by one, as is
+   * {@code external/rules_java++toolchains+local_jdk/lib}. Skipping them loses the dependency edge
+   * on whatever they point at, so a change behind such a link will not invalidate a cached entry.
+   *
+   * <p>Set per command from the analysis cache options, so a stock build keeps the assertion.
+   * Volatile because the writer is the command thread and the readers are the serializer's own
+   * executor, which never synchronizes with it.
+   */
+  private static volatile boolean tolerateAbsoluteSymlinks = false;
+
+  public static void setTolerateAbsoluteSymlinks(boolean tolerate) {
+    tolerateAbsoluteSymlinks = tolerate;
+  }
+
   /**
    * Counters for the progress of serialization.
    *
@@ -560,7 +579,7 @@ final class FileDependencySerializer {
       PathFragment link,
       FileInvalidationDataUploader uploader) {
     if (link.isAbsolute()) {
-      if (isInTest()) {
+      if (isInTest() || tolerateAbsoluteSymlinks) {
         // Test environments may use absolute symlinks, which aren't allowed in production
         // environments with analysis caching. Skips further dependency resolution for those.
         return immediateVoidFuture();

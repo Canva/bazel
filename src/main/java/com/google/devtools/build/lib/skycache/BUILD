@@ -1,0 +1,59 @@
+load("@rules_java//java:java_library.bzl", "java_library")
+
+package(
+    default_applicable_licenses = ["//:license"],
+    default_visibility = ["//src:__subpackages__"],
+)
+
+filegroup(
+    name = "srcs",
+    srcs = glob(["**"]),
+    visibility = ["//src:__subpackages__"],
+)
+
+java_library(
+    name = "skycache",
+    srcs = glob(["*.java"]),
+    deps = [
+        "//src/main/java/com/google/devtools/build/lib/analysis:blaze_directories",
+        "//src/main/java/com/google/devtools/build/lib/authandtls",
+        "//src/main/java/com/google/devtools/build/lib/authandtls/credentialhelper",
+        "//src/main/java/com/google/devtools/build/lib/authandtls/credentialhelper:credential_module",
+        "//src/main/java/com/google/devtools/build/lib/authandtls:grpc",
+        "//src/main/java/com/google/devtools/build/lib/concurrent/safeexecutor:safe_executor",
+        "//src/main/java/com/google/devtools/build/lib/events",
+        "//src/main/java/com/google/devtools/build/lib/runtime:blaze_command_cluster",
+        "//src/main/java/com/google/devtools/build/lib/skyframe/serialization",
+        "//src/main/java/com/google/devtools/build/lib/skyframe/serialization/analysis/proto:analysis_cache_service_metadata_status_java_proto",
+        "//src/main/java/com/google/devtools/build/lib/skyframe/serialization/analysis/proto:analysis_cache_service_miss_reason_java_proto",
+        "//src/main/java/com/google/devtools/build/lib/skyframe/serialization/analysis:client_id",
+        "//src/main/java/com/google/devtools/build/lib/skyframe/serialization/analysis:file_dependency_serializer",
+        "//src/main/java/com/google/devtools/build/lib/skyframe/serialization/analysis:lookup_result",
+        "//src/main/java/com/google/devtools/build/lib/skyframe/serialization/analysis:options",
+        "//src/main/java/com/google/devtools/build/lib/skyframe/serialization/analysis:remote_analysis_cache_client",
+        "//src/main/java/com/google/devtools/build/lib/skyframe/serialization/analysis:remote_analysis_cache_mode",
+        "//src/main/java/com/google/devtools/build/lib/skyframe/serialization/analysis:remote_analysis_caching_services_supplier",
+        "//src/main/java/com/google/devtools/build/lib/skyframe/serialization/analysis:sc_options",
+        "//src/main/java/com/google/devtools/build/lib/skyframe/serialization:fingerprint_value_store",
+        "//src/main/java/com/google/devtools/build/lib/skyframe/serialization:key_bytes_provider",
+        "//src/main/java/com/google/devtools/build/lib/skyframe/serialization:serialization_module",
+        "//src/main/java/com/google/devtools/build/lib/skyframe/serialization:write_status",
+        "//src/main/java/com/google/devtools/build/lib/skyframe/serialization:write_statuses",
+        "//src/main/java/com/google/devtools/build/lib/util:abrupt_exit_exception",
+        "//src/main/java/com/google/devtools/build/lib/util:bucket",
+        "//src/main/java/com/google/devtools/build/lib/util:detailed_exit_code",
+        "//src/main/java/com/google/devtools/build/lib/util:serialized_abrupt_exit_exception",
+        "//src/main/java/com/google/devtools/build/lib/versioning:long_version_getter",
+        "//src/main/java/com/google/devtools/build/lib/vfs",
+        "//src/main/java/com/google/devtools/common/options",
+        "//src/main/protobuf:analysis_cache_java_grpc",
+        "//src/main/protobuf:analysis_cache_java_proto",
+        "//src/main/protobuf:failure_details_java_proto",
+        "//src/main/protobuf:file_invalidation_data_java_proto",
+        "//third_party/grpc-java:grpc-jar",
+        "//third_party:auth",
+        "//third_party:guava",
+        "//third_party:jsr305",
+        "@com_google_protobuf//:protobuf_java",
+    ],
+)

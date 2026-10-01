@@ -114,6 +114,20 @@ public abstract class RemoteAnalysisCachingOptions extends OptionsBase {
       help = "The URL for the remote analysis caching backend.")
   public abstract String getRemoteAnalysisCache();
 
+  // No upstream equivalent: upstream bounds in-flight read requests rather than waiting for a batch
+  // to fill, so it has no linger to set. This implementation batches on a timer; see the comment on
+  // the read queue.
+  @Option(
+      name = "experimental_remote_analysis_cache_get_linger",
+      documentationCategory = OptionDocumentationCategory.UNDOCUMENTED,
+      effectTags = {OptionEffectTag.BAZEL_INTERNAL_CONFIGURATION},
+      defaultValue = "25ms",
+      converter = DurationConverter.class,
+      help =
+          "How long a partial read batch waits for company before being sent. This, not the batch"
+              + " size limit, decides read batch size in practice.")
+  public abstract Duration getReadLinger();
+
   // TODO: b/443947033 - add a way to disable retries
   @Option(
       name = "experimental_remote_analysis_unreachable_cache_retry_interval",

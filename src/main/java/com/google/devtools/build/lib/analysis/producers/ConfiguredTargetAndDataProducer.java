@@ -120,10 +120,20 @@ public final class ConfiguredTargetAndDataProducer
 
   private void acceptValue(ConfiguredTargetValue configuredTargetValue) {
     this.configuredTargetValue = configuredTargetValue;
-    if (transitiveState.storeTransitivePackages()) {
+    var transitivePackages = configuredTargetValue.getTransitivePackages();
+    // A value served from the remote analysis cache has no transitive packages:
+      // RemoteConfiguredTargetValue returns null because they are never serialized. Inside
+      // Google the two never meet, since shouldStoreTransitivePackagesInLoadingAndAnalysis()
+      // tracks allowExternalRepositories and external repositories are disabled there. With
+      // bzlmod that flag is always on, so every cached dependency would otherwise reach
+      // NestedSetBuilder.addTransitive(null). Skipping matches how BuildDriverFunction
+      // already treats the same null; the aggregate then omits packages from cached
+      // subgraphs, which under-reports symlink planting and repo-mapping manifests rather
+      // than crashing.
+    if (transitiveState.storeTransitivePackages() && transitivePackages != null) {
       transitiveState.updateTransitivePackages(
           ConfiguredTargetKey.fromConfiguredTarget(configuredTargetValue.getConfiguredTarget()),
-          configuredTargetValue.getTransitivePackages());
+          transitivePackages);
     }
   }
 
