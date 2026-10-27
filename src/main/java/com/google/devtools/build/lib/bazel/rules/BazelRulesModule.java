@@ -591,26 +591,6 @@ public final class BazelRulesModule extends BlazeModule {
 
     @Deprecated
     @Option(
-        name = "experimental_remote_analysis_cache",
-        defaultValue = "",
-        documentationCategory = OptionDocumentationCategory.UNDOCUMENTED,
-        effectTags = {OptionEffectTag.NO_OP},
-        metadataTags = {OptionMetadataTag.DEPRECATED},
-        help = "No-op.")
-    public abstract String getRemoteAnalysisCache();
-
-    @Deprecated
-    @Option(
-        name = "experimental_remote_analysis_unreachable_cache_retry_interval",
-        defaultValue = "",
-        documentationCategory = OptionDocumentationCategory.UNDOCUMENTED,
-        effectTags = {OptionEffectTag.NO_OP},
-        metadataTags = {OptionMetadataTag.DEPRECATED},
-        help = "No-op")
-    public abstract String getUnreachableCacheRetryInterval();
-
-    @Deprecated
-    @Option(
         name = "remote_analysis_json_log",
         defaultValue = "null",
         documentationCategory = OptionDocumentationCategory.UNDOCUMENTED,

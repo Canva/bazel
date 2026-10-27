@@ -19,12 +19,14 @@ import com.google.common.base.Strings;
 import com.google.common.hash.HashCode;
 import com.google.common.hash.Hashing;
 import com.google.devtools.common.options.Converter;
+import com.google.devtools.common.options.Converters.DurationConverter;
 import com.google.devtools.common.options.Option;
 import com.google.devtools.common.options.OptionDocumentationCategory;
 import com.google.devtools.common.options.OptionEffectTag;
 import com.google.devtools.common.options.OptionsBase;
 import com.google.devtools.common.options.OptionsClass;
 import com.google.devtools.common.options.OptionsParsingException;
+import java.time.Duration;
 import javax.annotation.Nullable;
 
 /** Options for caching analysis results remotely. */
@@ -103,6 +105,27 @@ public abstract class RemoteAnalysisCachingOptions extends OptionsBase {
       return Joiner.on(", ").join(RemoteAnalysisCacheMode.values());
     }
   }
+
+  @Option(
+      name = "experimental_remote_analysis_cache",
+      defaultValue = "",
+      documentationCategory = OptionDocumentationCategory.UNDOCUMENTED,
+      effectTags = {OptionEffectTag.BAZEL_INTERNAL_CONFIGURATION},
+      help = "The URL for the remote analysis caching backend.")
+  public abstract String getRemoteAnalysisCache();
+
+  // TODO: b/443947033 - add a way to disable retries
+  @Option(
+      name = "experimental_remote_analysis_unreachable_cache_retry_interval",
+      documentationCategory = OptionDocumentationCategory.UNDOCUMENTED,
+      effectTags = {OptionEffectTag.BAZEL_INTERNAL_CONFIGURATION},
+      defaultValue = "250ms",
+      converter = DurationConverter.class,
+      help =
+          "How long to wait before retrying a cache get request that failed due to an UNREACHABLE"
+              + " channel. This is a workaround for the client library reporting 'ready' "
+              + "prematurely.")
+  public abstract Duration getUnreachableCacheRetryInterval();
 
   @Option(
       name = "experimental_analysis_cache_key_distinguisher_for_testing",
