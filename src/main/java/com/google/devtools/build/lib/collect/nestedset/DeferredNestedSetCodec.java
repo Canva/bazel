@@ -16,6 +16,7 @@ package com.google.devtools.build.lib.collect.nestedset;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.devtools.build.lib.collect.nestedset.NestedArrayCodec.nestedArrayCodec;
 
+import com.google.common.collect.MapMaker;
 import com.google.devtools.build.lib.skyframe.serialization.AsyncDeserializationContext;
 import com.google.devtools.build.lib.skyframe.serialization.DeferredObjectCodec;
 import com.google.devtools.build.lib.skyframe.serialization.SerializationContext;
@@ -23,6 +24,7 @@ import com.google.devtools.build.lib.skyframe.serialization.SerializationExcepti
 import com.google.protobuf.CodedInputStream;
 import com.google.protobuf.CodedOutputStream;
 import java.io.IOException;
+import java.util.concurrent.ConcurrentMap;
 
 /**
  * A codec implementation that is asynchronous-compatible.
@@ -79,6 +81,19 @@ public final class DeferredNestedSetCodec extends DeferredObjectCodec<NestedSet<
     return builder;
   }
 
+  /**
+   * Sets already deserialized, by the children they were built over.
+   *
+   * <p>A {@code NestedSet} compares by identity, and so does a struct holding one. The writer may
+   * have put one set into several values that are each serialized separately; a reader that built
+   * a new set for each would hold copies that no longer compare equal, and a depset of structs
+   * holding them would keep every copy where the writer kept one. Children arrays are shared
+   * values, deduplicated by fingerprint, so the same children mean the same set here. Weak on both
+   * sides: a set references its children, and nothing here may keep either alive.
+   */
+  private static final ConcurrentMap<Object, NestedSet<?>> deserializedByChildren =
+      new MapMaker().weakKeys().weakValues().makeMap();
+
   private static class DeserializationBuilder implements DeferredValue<NestedSet<?>> {
     private final Order order;
     private final int approxDepth;
@@ -91,7 +106,18 @@ public final class DeferredNestedSetCodec extends DeferredObjectCodec<NestedSet<
 
     @Override
     public NestedSet<?> call() {
-      return NestedSet.forDeserialization(order, approxDepth, children);
+      NestedSet<?> existing = deserializedByChildren.get(children);
+      if (existing != null && existing.getOrder() == order) {
+        return existing;
+      }
+      NestedSet<?> created = NestedSet.forDeserialization(order, approxDepth, children);
+      if (existing == null) {
+        NestedSet<?> raced = deserializedByChildren.putIfAbsent(children, created);
+        if (raced != null && raced.getOrder() == order) {
+          return raced;
+        }
+      }
+      return created;
     }
 
     private static void setChildren(DeserializationBuilder builder, Object children) {

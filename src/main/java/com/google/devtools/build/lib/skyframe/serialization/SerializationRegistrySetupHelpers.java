@@ -24,6 +24,7 @@ import com.google.devtools.build.lib.actions.RunfilesArtifactValue;
 import com.google.devtools.build.lib.analysis.AspectValue;
 import com.google.devtools.build.lib.analysis.BlazeDirectories;
 import com.google.devtools.build.lib.analysis.ConfiguredRuleClassProvider;
+import com.google.devtools.build.lib.analysis.Runfiles;
 import com.google.devtools.build.lib.analysis.TransitiveInfoProviderMapImpl;
 import com.google.devtools.build.lib.analysis.config.BuildConfigurationValue;
 import com.google.devtools.build.lib.analysis.config.BuildOptions;
@@ -166,6 +167,8 @@ public final class SerializationRegistrySetupHelpers {
             RuleConfiguredTarget.class,
             FeatureConfiguration.class,
             RunfilesArtifactValue.class,
+            // Compares by identity, and structs in depsets hold it: rules_go's GoArchiveData.
+            Runfiles.class,
             AspectValue.class,
             AliasConfiguredTarget.class,
             BuildConfigurationValue.class,

@@ -37,6 +37,7 @@ import com.google.devtools.build.lib.concurrent.BlazeInterners;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
 import com.google.devtools.build.lib.packages.semantics.BuildLanguageOptions;
 import com.google.devtools.build.lib.skyframe.serialization.VisibleForSerialization;
+import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
 import com.google.devtools.build.lib.skyframe.serialization.autocodec.SerializationConstant;
 import com.google.devtools.build.lib.starlarkbuildapi.RunfilesApi;
 import com.google.devtools.build.lib.util.Fingerprint;
@@ -67,6 +68,7 @@ import net.starlark.java.eval.StarlarkThread;
  * symlinks and root symlinks (outside of the source tree).
  */
 @Immutable
+@AutoCodec
 public final class Runfiles implements RunfilesApi {
 
   private static class DummyEmptyFilesSupplier implements EmptyFilesSupplier {
@@ -196,7 +198,11 @@ public final class Runfiles implements RunfilesApi {
   /** Policy for this Runfiles tree */
   private ConflictPolicy conflictPolicy;
 
-  private Runfiles(
+  // An instantiator, rather than reflection, so that the remote analysis cache can share instances
+  // between the values that hold them: Runfiles compares by identity.
+  @AutoCodec.Instantiator
+  @VisibleForSerialization
+  Runfiles(
       String prefix,
       NestedSet<Artifact> artifacts,
       NestedSet<SymlinkEntry> symlinks,
