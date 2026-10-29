@@ -1,4 +1,4 @@
-load("@rules_java//java:defs.bzl", "java_test")
+load("@rules_java//java:defs.bzl", "java_binary", "java_test")
 
 package(
     default_applicable_licenses = ["//:license"],
@@ -40,5 +40,19 @@ java_test(
         "//third_party:jsr305",
         "//third_party:junit4",
         "//third_party:truth",
+    ],
+)
+
+java_binary(
+    name = "DevAnalysisCacheServer",
+    testonly = True,
+    srcs = ["DevAnalysisCacheServer.java"],
+    main_class = "com.google.devtools.build.lib.skycache.DevAnalysisCacheServer",
+    deps = [
+        "//src/main/protobuf:analysis_cache_java_grpc",
+        "//src/main/protobuf:analysis_cache_java_proto",
+        "//third_party:netty",
+        "//third_party/grpc-java:grpc-jar",
+        "@com_google_protobuf//:protobuf_java",
     ],
 )
