@@ -346,6 +346,33 @@ java_library(
 )
 
 java_library(
+    name = "validating_analysis_cache_client",
+    srcs = ["ValidatingAnalysisCacheClient.java"],
+    visibility = ["//src:__subpackages__"],
+    deps = [
+        ":file_dependency_deserializer",
+        ":lookup_result",
+        ":lookup_result_impl",
+        ":remote_analysis_cache_client",
+        ":versioned_changes",
+        ":versioned_changes_validator",
+        "//src/main/java/com/google/devtools/build/lib/compress:compression_service",
+        "//src/main/java/com/google/devtools/build/lib/concurrent/safeexecutor:safe_executor",
+        "//src/main/java/com/google/devtools/build/lib/skyframe/serialization",
+        "//src/main/java/com/google/devtools/build/lib/skyframe/serialization:fingerprint_value_store",
+        "//src/main/java/com/google/devtools/build/lib/skyframe/serialization/analysis/proto:analysis_cache_service_metadata_status_java_proto",
+        "//src/main/java/com/google/devtools/build/lib/skyframe/serialization/analysis/proto:analysis_cache_service_miss_reason_java_proto",
+        "//src/main/java/com/google/devtools/build/lib/util:bucket",
+        "//src/main/protobuf:file_invalidation_data_java_proto",
+        "//third_party/java/guava:base",
+        "//third_party/java/guava:collect",
+        "//third_party/java/guava:concurrent",
+        "//third_party/java/jsr305_annotations",
+        "//third_party/java/protobuf",
+    ],
+)
+
+java_library(
     name = "file_dependency_key_support",
     srcs = ["FileDependencyKeySupport.java"],
     visibility = [
