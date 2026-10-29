@@ -69,6 +69,7 @@ import com.google.devtools.build.lib.skyframe.serialization.analysis.RemoteAnaly
 import com.google.devtools.build.lib.util.AbruptExitException;
 import com.google.devtools.build.lib.util.DetailedExitCode;
 import com.google.devtools.build.lib.util.SerializedAbruptExitException;
+import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.Root;
 import com.google.devtools.build.lib.vfs.Root.RootCodecDependencies;
 import com.google.devtools.common.options.OptionDefinition;
@@ -349,11 +350,15 @@ public final class RemoteAnalysisCacheFactory {
       RuleClassProvider ruleClassProvider,
       SkyframeExecutor skyframeExecutor,
       BlazeDirectories directories,
+      Path execRoot,
       BuildOptions topLevelOptions,
       SettablePlatformConfigurationProvider platformConfigurationProvider) {
     var roots = ImmutableList.<Root>builder().add(Root.fromPath(directories.getWorkspace()));
     if (directories.isBlaze()) {
       roots.add(Root.fromPath(directories.getBlazeExecRoot()));
+    } else {
+      // Every derived artifact's root is serialized as its exec root, as above for Blaze.
+      roots.add(Root.fromPath(execRoot));
     }
 
     ImmutableClassToInstanceMap.Builder<Object> serializationDeps =
@@ -362,7 +367,12 @@ public final class RemoteAnalysisCacheFactory {
                 ArtifactSerializationContext.class,
                 skyframeExecutor.getSkyframeBuildView().getArtifactFactory()::getSourceArtifact)
             .put(RuleClassProvider.class, ruleClassProvider)
-            .put(RootCodecDependencies.class, new RootCodecDependencies(roots.build()))
+            .put(
+                RootCodecDependencies.class,
+                // Anything else in the output base, such as an external repository's source root,
+                // is written relative to it so a reader resolves it in its own.
+                new RootCodecDependencies(
+                    roots.build(), ImmutableList.of(directories.getOutputBase())))
             .put(PackagePathCodecDependencies.class, skyframeExecutor::getPackagePathEntries)
             // This is needed to determine TargetData for a ConfiguredTarget during serialization.
             .put(PrerequisitePackageFunction.class, skyframeExecutor::getExistingPackage)
@@ -385,6 +395,7 @@ public final class RemoteAnalysisCacheFactory {
                 env.getRuntime().getRuleClassProvider(),
                 env.getBlazeWorkspace().getSkyframeExecutor(),
                 env.getDirectories(),
+                env.getExecRoot(),
                 topLevelOptions,
                 platformConfigurationProvider),
         commandExecutor);

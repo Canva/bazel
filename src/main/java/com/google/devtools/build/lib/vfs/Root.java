@@ -262,6 +262,7 @@ public abstract class Root implements Comparable<Root> {
   /** Serialization dependencies for {@link RootCodec}. */
   public static class RootCodecDependencies {
     private final ImmutableList<Root> likelyPopularRoots;
+    private final ImmutableList<Path> relocatableBases;
 
     /** Convenience constructor for an instance with no likely roots. */
     public RootCodecDependencies() {
@@ -286,7 +287,22 @@ public abstract class Root implements Comparable<Root> {
      * coming first.
      */
     public RootCodecDependencies(Iterable<Root> likelyPopularRoots) {
+      this(likelyPopularRoots, ImmutableList.of());
+    }
+
+    /**
+     * Creates an instance with the given likely roots and relocatable bases.
+     *
+     * <p>A path root under one of {@code relocatableBases} that is not a likely root is serialized
+     * relative to the first base containing it, and deserialized under the base at the same index.
+     * That is what lets a value serialized in one output base be read in another: a source root in
+     * an external repository, or an exec root other than a likely one, would otherwise name the
+     * writer's directories. Writer and reader must list corresponding bases in the same order.
+     */
+    public RootCodecDependencies(
+        Iterable<Root> likelyPopularRoots, Iterable<Path> relocatableBases) {
       this.likelyPopularRoots = ImmutableList.copyOf(likelyPopularRoots);
+      this.relocatableBases = ImmutableList.copyOf(relocatableBases);
       // max length 255; value at index i encoded as number i + 1; value 0 means "not one of these".
       Preconditions.checkArgument(this.likelyPopularRoots.size() < 256);
     }
@@ -302,6 +318,11 @@ public abstract class Root implements Comparable<Root> {
 
     private static final DynamicCodec PATH_ROOT_CODEC = new DynamicCodec(PathRoot.class);
     private static final DynamicCodec ABSOLUTE_ROOT_CODEC = new DynamicCodec(AbsoluteRoot.class);
+
+    // What follows the 0 marker. The first two are the boolean this codec wrote before relocation.
+    private static final int ABSOLUTE_ROOT = 0;
+    private static final int PATH_ROOT = 1;
+    private static final int RELOCATED_PATH_ROOT = 2;
 
     @Override
     public Class<? extends Root> getEncodedClass() {
@@ -329,11 +350,21 @@ public abstract class Root implements Comparable<Root> {
       // Everything else.
       codedOut.write((byte) 0);
 
-      if (root instanceof PathRoot) {
-        codedOut.writeBoolNoTag(true);
+      if (root instanceof PathRoot pathRoot) {
+        PathFragment fragment = pathRoot.path.asFragment();
+        for (int i = 0; i < codecDeps.relocatableBases.size(); i++) {
+          PathFragment base = codecDeps.relocatableBases.get(i).asFragment();
+          if (fragment.startsWith(base)) {
+            codedOut.writeUInt32NoTag(RELOCATED_PATH_ROOT);
+            codedOut.writeUInt32NoTag(i);
+            codedOut.writeStringNoTag(fragment.relativeTo(base).getPathString());
+            return;
+          }
+        }
+        codedOut.writeUInt32NoTag(PATH_ROOT);
         PATH_ROOT_CODEC.serialize(context, root, codedOut);
       } else if (root instanceof AbsoluteRoot) {
-        codedOut.writeBoolNoTag(false);
+        codedOut.writeUInt32NoTag(ABSOLUTE_ROOT);
         ABSOLUTE_ROOT_CODEC.serialize(context, root, codedOut);
       } else {
         throw new IllegalStateException("Unexpected Root: " + root);
@@ -351,9 +382,29 @@ public abstract class Root implements Comparable<Root> {
         return popularRoot;
       }
 
-      return (Root)
-          (codedIn.readBool() ? PATH_ROOT_CODEC : ABSOLUTE_ROOT_CODEC)
-              .deserializeAsync(context, codedIn);
+      int kind = codedIn.readRawVarint32();
+      switch (kind) {
+        case PATH_ROOT -> {
+          return (Root) PATH_ROOT_CODEC.deserializeAsync(context, codedIn);
+        }
+        case ABSOLUTE_ROOT -> {
+          return (Root) ABSOLUTE_ROOT_CODEC.deserializeAsync(context, codedIn);
+        }
+        case RELOCATED_PATH_ROOT -> {
+          RootCodecDependencies codecDeps = context.getDependency(RootCodecDependencies.class);
+          int baseIndex = codedIn.readRawVarint32();
+          if (baseIndex >= codecDeps.relocatableBases.size()) {
+            throw new SerializationException(
+                "relocatable base " + baseIndex + " is not among " + codecDeps.relocatableBases);
+          }
+          Root relocated =
+              Root.fromPath(
+                  codecDeps.relocatableBases.get(baseIndex).getRelative(codedIn.readString()));
+          context.registerInitialValue(relocated);
+          return relocated;
+        }
+        default -> throw new SerializationException("unexpected root kind " + kind);
+      }
     }
   }
 }

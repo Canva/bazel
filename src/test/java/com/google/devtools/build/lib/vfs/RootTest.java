@@ -167,4 +167,35 @@ public class RootTest {
     assertThat(fsAabsoluteRootDeserialized).isNotSameInstanceAs(fsAabsoluteRoot);
     assertThat(fsAabsoluteRootDeserialized).isEqualTo(fsAabsoluteRoot);
   }
+
+  @Test
+  public void testSerialization_rootUnderRelocatableBaseMovesWithIt() throws Exception {
+    Root workspace = Root.fromPath(fs.getPath("/ws"));
+    Root repository = Root.fromPath(fs.getPath("/writer/output_base/external/foo+"));
+    Root elsewhere = Root.fromPath(fs.getPath("/elsewhere"));
+    ObjectCodecs writer = codecs(workspace, fs.getPath("/writer/output_base"));
+    ObjectCodecs reader = codecs(workspace, fs.getPath("/reader/output_base"));
+
+    assertThat(reader.deserialize(writer.serialize(repository)))
+        .isEqualTo(Root.fromPath(fs.getPath("/reader/output_base/external/foo+")));
+    // A likely root still wins, and roots outside every base are read back as they were.
+    assertThat(reader.deserialize(writer.serialize(workspace))).isSameInstanceAs(workspace);
+    assertThat(reader.deserialize(writer.serialize(elsewhere))).isEqualTo(elsewhere);
+    assertThat(reader.deserialize(writer.serialize(Root.absoluteRoot(fs))))
+        .isEqualTo(Root.absoluteRoot(fs));
+  }
+
+  private ObjectCodecs codecs(Root likelyRoot, Path relocatableBase) {
+    ImmutableClassToInstanceMap<Object> dependencies =
+        ImmutableClassToInstanceMap.builder()
+            .put(FileSystem.class, fs)
+            .put(
+                Root.RootCodecDependencies.class,
+                new Root.RootCodecDependencies(
+                    ImmutableList.of(likelyRoot), ImmutableList.of(relocatableBase)))
+            .build();
+    ObjectCodecRegistry.Builder registryBuilder = AutoRegistry.get().getBuilder();
+    registryBuilder.addReferenceConstant(fs);
+    return new ObjectCodecs(registryBuilder.build(), dependencies);
+  }
 }
