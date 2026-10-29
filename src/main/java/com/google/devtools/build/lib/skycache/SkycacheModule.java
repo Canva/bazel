@@ -20,6 +20,7 @@ import com.google.devtools.build.lib.authandtls.AuthAndTLSOptions;
 import com.google.devtools.build.lib.authandtls.GoogleAuthUtils;
 import com.google.devtools.build.lib.authandtls.credentialhelper.CredentialHelperEnvironment;
 import com.google.devtools.build.lib.authandtls.credentialhelper.CredentialModule;
+import com.google.devtools.build.lib.cmdline.LabelConstants;
 import com.google.devtools.build.lib.events.Event;
 import com.google.devtools.build.lib.events.ExtendedEventHandler;
 import com.google.devtools.build.lib.runtime.BlazeRuntime;
@@ -106,6 +107,16 @@ public final class SkycacheModule extends SerializationModule {
             && options.getRemoteAnalysisCache() != null
             && !options.getRemoteAnalysisCache().isEmpty();
     FileDependencySerializer.setTolerateAbsoluteSymlinks(enabled);
+    // Paths under external/ are versioned through the module files rather than followed; see
+    // RepositoryBoundary. Like the above, a stock build keeps the serializer's original behaviour.
+    FileDependencySerializer.setRepositoryBoundary(
+        enabled && env.getWorkspace() != null
+            ? new FileDependencySerializer.RepositoryBoundary(
+                env.getWorkspace(),
+                env.getDirectories()
+                    .getOutputBase()
+                    .getRelative(LabelConstants.EXTERNAL_REPOSITORY_LOCATION))
+            : null);
     if (!enabled) {
       return;
     }

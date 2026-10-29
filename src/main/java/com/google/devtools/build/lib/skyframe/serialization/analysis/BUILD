@@ -225,6 +225,7 @@ java_library(
     visibility = [
         "//src/test/java/com/google/devtools/build/lib/skyframe/serialization/analysis:__pkg__",
         "//src/main/java/com/google/devtools/build/lib/skycache:__pkg__",
+        "//src/test/java/com/google/devtools/build/lib/skyframe/serialization/analysis:__pkg__",
     ],
     deps = [
         ":file_dependency_key_support",
@@ -235,6 +236,7 @@ java_library(
         ":value_or_future_map",
         "//src/main/java/com/google/devtools/build/lib/actions:file_metadata",
         "//src/main/java/com/google/devtools/build/lib/analysis:analysis_core",
+        "//src/main/java/com/google/devtools/build/lib/cmdline",
         "//src/main/java/com/google/devtools/build/lib/compress:compression_service",
         "//src/main/java/com/google/devtools/build/lib/concurrent",
         "//src/main/java/com/google/devtools/build/lib/concurrent/safeexecutor:safe_executor",

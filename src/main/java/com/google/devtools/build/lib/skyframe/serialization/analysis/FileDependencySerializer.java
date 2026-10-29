@@ -21,6 +21,7 @@ import static com.google.common.util.concurrent.Futures.immediateVoidFuture;
 import static com.google.common.util.concurrent.MoreExecutors.directExecutor;
 import static com.google.devtools.build.lib.actions.FileStateType.SYMLINK;
 import static com.google.devtools.build.lib.skyframe.serialization.WriteStatuses.aggregateWriteStatuses;
+import static com.google.devtools.build.lib.skyframe.serialization.WriteStatuses.immediateWriteStatus;
 import static com.google.devtools.build.lib.skyframe.serialization.analysis.FileDependencyKeySupport.DIRECTORY_KEY_DELIMITER;
 import static com.google.devtools.build.lib.skyframe.serialization.analysis.FileDependencyKeySupport.FILE_KEY_DELIMITER;
 import static com.google.devtools.build.lib.skyframe.serialization.analysis.FileDependencyKeySupport.MAX_KEY_LENGTH;
@@ -35,6 +36,8 @@ import static java.nio.charset.StandardCharsets.UTF_8;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Function;
+import com.google.common.base.Supplier;
+import com.google.common.base.Suppliers;
 import com.google.common.collect.ImmutableList;
 import com.google.common.util.concurrent.AsyncFunction;
 import com.google.common.util.concurrent.FutureCallback;
@@ -51,6 +54,7 @@ import com.google.devtools.build.lib.profiler.CounterSeriesCollector;
 import com.google.devtools.build.lib.profiler.CounterSeriesTask;
 import com.google.devtools.build.lib.profiler.CounterSeriesTask.Color;
 import com.google.devtools.build.lib.profiler.CounterSeriesTaskImpl;
+import com.google.devtools.build.lib.cmdline.LabelConstants;
 import com.google.devtools.build.lib.skyframe.AbstractNestedFileOpNodes;
 import com.google.devtools.build.lib.skyframe.AbstractNestedFileOpNodes.NestedFileOpNodes;
 import com.google.devtools.build.lib.skyframe.AbstractNestedFileOpNodes.NestedFileOpNodesWithSource;
@@ -86,6 +90,7 @@ import com.google.devtools.build.lib.skyframe.serialization.proto.Symlink;
 import com.google.devtools.build.lib.versioning.LongVersionGetter;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.PathFragment;
+import com.google.devtools.build.lib.vfs.Root;
 import com.google.devtools.build.lib.vfs.RootedPath;
 import com.google.devtools.build.skyframe.InMemoryGraph;
 import com.google.devtools.build.skyframe.InMemoryNodeEntry;
@@ -94,10 +99,12 @@ import com.google.protobuf.CodedOutputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.io.UncheckedIOException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BiConsumer;
@@ -183,6 +190,96 @@ public final class FileDependencySerializer {
     }
   }
 
+  /**
+   * Where external repositories live, and the workspace some of them are backed by.
+   *
+   * <p>Paths under {@link #externalRoot} cannot be versioned by the workspace's version control:
+   * their contents are fetched, or served from the repository contents cache through an absolute
+   * symlink, and Skyframe may hold no node for a path the serializer would otherwise follow there.
+   * What decides a fetched repository's contents is already a dependency of anything that reads it,
+   * through the module resolution and repository nodes, which depend on the module files, the
+   * lockfile and whatever a repository rule read from the workspace.
+   *
+   * <p>So the serializer does not descend into a repository. A path inside one is recorded either
+   * as the workspace path it resolves to, for repositories such as {@code local_repository} that
+   * are symlinks into the workspace, or as a single {@code external/<name>} entry per repository
+   * versioned at the module files, which a reader invalidates whenever any module file changed.
+   *
+   * <p>Paths outside both the workspace and {@link #externalRoot} are recorded as constant, like
+   * the file system root. They are mostly the repository contents cache behind those absolute
+   * symlinks, which is content addressed, and otherwise toolchain paths no version control sees,
+   * which a reader therefore has to share with the writer.
+   */
+  public record RepositoryBoundary(Path workspaceRoot, Path externalRoot) {
+    /**
+     * Returns the repository {@code path} lies in, the empty string for {@link #externalRoot}
+     * itself, or null if {@code path} is not under it.
+     */
+    @Nullable
+    String repositoryName(Path path) {
+      if (!isUnder(path, externalRoot)) {
+        return null;
+      }
+      PathFragment relative = path.asFragment().relativeTo(externalRoot.asFragment());
+      return relative.isEmpty() ? "" : relative.getSegment(0);
+    }
+
+    /** Whether {@code path} lies outside both the workspace and the external repositories. */
+    boolean isUnversioned(Path path) {
+      return !isUnder(path, workspaceRoot) && !isUnder(path, externalRoot);
+    }
+
+    /**
+     * Whether {@code rootedPath} names a workspace path through a root other than the workspace,
+     * such as the absolute root. Recorded under its own root it would be keyed by an absolute path
+     * whose parent, outside the workspace, has no entry for a reader to resolve.
+     */
+    boolean isWorkspaceAlias(RootedPath rootedPath) {
+      if (workspaceRelative(rootedPath.asPath()) == null) {
+        return false;
+      }
+      Path root = rootedPath.getRoot().asPath(); // Null for the absolute root.
+      return root == null || !root.asFragment().equals(workspaceRoot.asFragment());
+    }
+
+    /** Returns {@code path} relative to the workspace, or null if it lies outside it. */
+    @Nullable
+    PathFragment workspaceRelative(Path path) {
+      if (!isUnder(path, workspaceRoot) || isUnder(path, externalRoot)) {
+        return null;
+      }
+      return path.asFragment().relativeTo(workspaceRoot.asFragment());
+    }
+
+    /**
+     * Compares by path alone. {@link Path#startsWith(Path)} also requires the same file system
+     * instance, and the package roots and the command's directories need not share one, as when
+     * the remote repository contents cache overlays the native file system.
+     */
+    private static boolean isUnder(Path path, Path root) {
+      return path.asFragment().startsWith(root.asFragment());
+    }
+  }
+
+  /**
+   * The boundary applied to serializers created from now on, or null to follow every path.
+   *
+   * <p>Set per command alongside {@link #tolerateAbsoluteSymlinks}, so a stock build is unaffected.
+   */
+  @Nullable private static volatile RepositoryBoundary repositoryBoundary = null;
+
+  public static void setRepositoryBoundary(@Nullable RepositoryBoundary boundary) {
+    repositoryBoundary = boundary;
+  }
+
+  /** Whether {@code baseName} names a file that can change what an external repository holds. */
+  private static boolean isModuleFile(String baseName) {
+    return baseName.equals("MODULE.bazel")
+        || baseName.endsWith(".MODULE.bazel")
+        || baseName.equals("MODULE.bazel.lock")
+        || baseName.equals("REPO.bazel");
+  }
+
   @VisibleForTesting public static final int COMPRESSION_NUM_BYTES_THRESHOLD = 580;
 
   private final CompressionService compressionService;
@@ -192,6 +289,23 @@ public final class FileDependencySerializer {
   private final SafeExecutor executor;
   private final Counters counters;
   @Nullable private final ProfileCollector profileCollector;
+  @Nullable private final RepositoryBoundary boundary;
+
+  /** One synthetic file entry per external repository, keyed by repository name. */
+  private final ConcurrentHashMap<String, FileInvalidationDataInfo> repositoryFileData =
+      new ConcurrentHashMap<>();
+
+  /** One synthetic listing entry per external repository, keyed by repository name. */
+  private final ConcurrentHashMap<String, ListingInvalidationDataInfo> repositoryListingData =
+      new ConcurrentHashMap<>();
+
+  /** Write statuses of the directory entries {@link #writeDirectoryRecords} has written. */
+  private final ConcurrentHashMap<PathFragment, WriteStatus> plainDirectoryRecords =
+      new ConcurrentHashMap<>();
+
+  /** The newest version of any module file in the graph, computed on first use. */
+  private final Supplier<Long> moduleFilesVersion =
+      Suppliers.memoize(this::computeModuleFilesVersion);
 
   private final ValueOrFutureMap<FileKey, FileDataInfoOrFuture, FileDataInfo, FutureFileDataInfo>
       fileDataInfo =
@@ -217,6 +331,25 @@ public final class FileDependencySerializer {
       KeyValueWriter writer,
       SafeExecutor executor,
       @Nullable ProfileCollector profileCollector) {
+    this(
+        versionGetter,
+        graph,
+        compressionService,
+        writer,
+        executor,
+        profileCollector,
+        repositoryBoundary);
+  }
+
+  @VisibleForTesting
+  FileDependencySerializer(
+      LongVersionGetter versionGetter,
+      InMemoryGraph graph,
+      CompressionService compressionService,
+      KeyValueWriter writer,
+      SafeExecutor executor,
+      @Nullable ProfileCollector profileCollector,
+      @Nullable RepositoryBoundary boundary) {
     this.versionGetter = versionGetter;
     this.graph = graph;
     this.writer = writer;
@@ -224,6 +357,7 @@ public final class FileDependencySerializer {
     this.executor = executor;
     this.counters = new Counters();
     this.profileCollector = profileCollector;
+    this.boundary = boundary;
   }
 
   Counters getCounters() {
@@ -322,6 +456,22 @@ public final class FileDependencySerializer {
 
     FileKey key = future.key();
     RootedPath rootedPath = key.argument();
+    if (boundary != null && !(rootedPath.getRoot().getFileSystem() instanceof BundledFileSystem)) {
+      String repository = boundary.repositoryName(rootedPath.asPath());
+      if (repository != null) {
+        // Not tracked by the counters: nothing here waits on dependencies.
+        counters.nodesWaitingForDeps.decrementAndGet();
+        return populateRepositoryFileDataInfo(future, repository);
+      }
+      if (boundary.isUnversioned(rootedPath.asPath())) {
+        counters.nodesWaitingForDeps.decrementAndGet();
+        return future.completeWith(CONSTANT_FILE);
+      }
+      if (boundary.isWorkspaceAlias(rootedPath)) {
+        counters.nodesWaitingForDeps.decrementAndGet();
+        return populateRepositoryFileDataInfo(future, /* repository= */ null);
+      }
+    }
     RootedPath parentRootedPath;
     // Builtin files don't change.
     if ((rootedPath.getRoot().getFileSystem() instanceof BundledFileSystem)
@@ -714,6 +864,22 @@ public final class FileDependencySerializer {
     if (rootedPath.getRoot().getFileSystem() instanceof BundledFileSystem) {
       counters.nodesWaitingForDeps.decrementAndGet();
       return future.completeWith(CONSTANT_LISTING); // This listing doesn't change.
+    }
+    if (boundary != null) {
+      String repository = boundary.repositoryName(rootedPath.asPath());
+      if (repository != null) {
+        // Not tracked by the counters: nothing here waits on dependencies.
+        counters.nodesWaitingForDeps.decrementAndGet();
+        return populateRepositoryListingDataInfo(future, repository);
+      }
+      if (boundary.isUnversioned(rootedPath.asPath())) {
+        counters.nodesWaitingForDeps.decrementAndGet();
+        return future.completeWith(CONSTANT_LISTING);
+      }
+      if (boundary.isWorkspaceAlias(rootedPath)) {
+        counters.nodesWaitingForDeps.decrementAndGet();
+        return populateRepositoryListingDataInfo(future, /* repository= */ null);
+      }
     }
     var handler = new ListingFileHandler(rootedPath);
     switch (registerDependency(FileValue.key(rootedPath))) {
@@ -1198,6 +1364,231 @@ public final class FileDependencySerializer {
       throw new AssertionError("Unexpected IOException from ByteArrayOutputStream", e);
     }
   }
+
+  /**
+   * Records a file inside an external repository without statting, versioning or following it.
+   *
+   * <p>See {@link RepositoryBoundary} for why nothing is lost by stopping here.
+   *
+   * @param repository the repository the path is in, or null for a workspace path reached through
+   *     another root, which is recorded as the workspace path or, if it resolves outside the
+   *     workspace, as constant
+   */
+  private FileDataInfoOrFuture populateRepositoryFileDataInfo(
+      FutureFileDataInfo future, @Nullable String repository) {
+    RootedPath rootedPath = future.key().argument();
+    InMemoryNodeEntry nodeEntry = graph.getIfPresent(future.key());
+    if (nodeEntry != null && nodeEntry.getValue() instanceof FileValue value) {
+      RootedPath realRootedPath = value.realRootedPath(rootedPath);
+      PathFragment workspacePath = boundary.workspaceRelative(realRootedPath.asPath());
+      if (workspacePath != null) {
+        // A repository backed by the workspace, such as local_repository: the file is a workspace
+        // file, and an edit to it reaches readers as a change to its workspace path.
+        var workspaceKey =
+            FileKey.create(toRootedPath(Root.fromPath(boundary.workspaceRoot()), workspacePath));
+        if (graph.getIfPresent(workspaceKey) != null) {
+          // Recorded exactly as the main repository records it, so the two agree on the entry.
+          return switch (registerDependency(workspaceKey)) {
+            case FileDataInfo info -> future.completeWith(info);
+            case FutureFileDataInfo futureInfo -> future.completeWith(futureInfo);
+          };
+        }
+        long mtsv;
+        try {
+          mtsv =
+              value.isDirectory()
+                  ? LongVersionGetter.MINIMAL
+                  : getVersion(realRootedPath, value.exists());
+        } catch (IOException e) {
+          return future.failWith(e);
+        }
+        var data = FileInvalidationData.newBuilder();
+        String cacheKey = computeCacheKey(workspacePath, mtsv, FILE_KEY_DELIMITER);
+        KeyBytesProvider keyBytes = getKeyBytes(cacheKey, data::setOverflowKey);
+        return future.completeWith(
+            new FileInvalidationDataInfo(
+                cacheKey,
+                aggregateWriteStatuses(
+                    ImmutableList.of(
+                        writer.put(keyBytes, data.build().toByteArray()),
+                        writeDirectoryRecords(workspacePath.getParentDirectory()))),
+                value.exists(),
+                mtsv,
+                realRootedPath));
+      }
+    }
+    try {
+      return future.completeWith(
+          repository == null ? CONSTANT_FILE : getRepositoryFileData(repository));
+    } catch (IOException e) {
+      return future.failWith(e);
+    }
+  }
+
+  /** The listing counterpart of {@link #populateRepositoryFileDataInfo}. */
+  private ListingDataInfoOrFuture populateRepositoryListingDataInfo(
+      FutureListingDataInfo future, @Nullable String repository) {
+    RootedPath rootedPath = future.key().argument();
+    InMemoryNodeEntry nodeEntry = graph.getIfPresent(FileValue.key(rootedPath));
+    if (nodeEntry != null && nodeEntry.getValue() instanceof FileValue value) {
+      RootedPath realRootedPath = value.realRootedPath(rootedPath);
+      PathFragment workspacePath = boundary.workspaceRelative(realRootedPath.asPath());
+      if (workspacePath != null) {
+        var workspaceKey =
+            DirectoryListingKey.create(
+                toRootedPath(Root.fromPath(boundary.workspaceRoot()), workspacePath));
+        if (graph.getIfPresent(workspaceKey) != null) {
+          return switch (registerDependency(workspaceKey)) {
+            case ListingDataInfo info -> future.completeWith(info);
+            case FutureListingDataInfo futureInfo -> future.completeWith(futureInfo);
+          };
+        }
+        long mtsv;
+        try {
+          mtsv = versionGetter.getDirectoryListingVersion(realRootedPath.asPath());
+        } catch (IOException e) {
+          return future.failWith(e);
+        }
+        var data = DirectoryListingInvalidationData.newBuilder();
+        String cacheKey = computeCacheKey(workspacePath, mtsv, DIRECTORY_KEY_DELIMITER);
+        KeyBytesProvider keyBytes = getKeyBytes(cacheKey, data::setOverflowKey);
+        // A reader resolves a listing through the directory's own file entry, at MINIMAL here.
+        return future.completeWith(
+            new ListingInvalidationDataInfo(
+                cacheKey,
+                aggregateWriteStatuses(
+                    ImmutableList.of(
+                        writer.put(keyBytes, data.build().toByteArray()),
+                        writeDirectoryRecords(workspacePath)))));
+      }
+    }
+    try {
+      return future.completeWith(
+          repository == null ? CONSTANT_LISTING : getRepositoryListingData(repository));
+    } catch (IOException e) {
+      return future.failWith(e);
+    }
+  }
+
+  /** Returns, writing it on first use, the single file entry standing for {@code repository}. */
+  private FileInvalidationDataInfo getRepositoryFileData(String repository) throws IOException {
+    long version = getModuleFilesVersion();
+    return repositoryFileData.computeIfAbsent(
+        repository,
+        name -> {
+          var data = FileInvalidationData.newBuilder();
+          PathFragment keyPath = repositoryKeyPath(name);
+          String cacheKey = computeCacheKey(keyPath, version, FILE_KEY_DELIMITER);
+          KeyBytesProvider keyBytes = getKeyBytes(cacheKey, data::setOverflowKey);
+          return new FileInvalidationDataInfo(
+              cacheKey,
+              aggregateWriteStatuses(
+                  ImmutableList.of(
+                      writer.put(keyBytes, data.build().toByteArray()),
+                      writeDirectoryRecords(keyPath.getParentDirectory()))),
+              /* exists= */ true,
+              version,
+              toRootedPath(Root.fromPath(boundary.externalRoot()), PathFragment.create(name)));
+        });
+  }
+
+  /** Returns, writing it on first use, the single listing entry standing for {@code repository}. */
+  private ListingInvalidationDataInfo getRepositoryListingData(String repository)
+      throws IOException {
+    long version = getModuleFilesVersion();
+    // A reader resolves the listing through the repository's file entry, so that has to exist.
+    FileInvalidationDataInfo fileData = getRepositoryFileData(repository);
+    return repositoryListingData.computeIfAbsent(
+        repository,
+        name -> {
+          var data = DirectoryListingInvalidationData.newBuilder();
+          if (version != LongVersionGetter.MINIMAL) {
+            data.setFileMtsv(version);
+          }
+          String cacheKey =
+              computeCacheKey(repositoryKeyPath(name), version, DIRECTORY_KEY_DELIMITER);
+          KeyBytesProvider keyBytes = getKeyBytes(cacheKey, data::setOverflowKey);
+          return new ListingInvalidationDataInfo(
+              cacheKey,
+              aggregateWriteStatuses(
+                  ImmutableList.of(
+                      writer.put(keyBytes, data.build().toByteArray()), fileData.writeStatus())));
+        });
+  }
+
+  /**
+   * Writes the file entries for {@code directory} and its ancestors as plain directories, at
+   * {@link LongVersionGetter#MINIMAL} with no symlinks, the way the main repository records an
+   * unsymlinked directory.
+   *
+   * <p>Entries written here carry no parent version, and a reader reconstructs the parent's key
+   * from that, so each ancestor has to be present or the reader sees missing data and treats the
+   * entry as always invalid.
+   */
+  private WriteStatus writeDirectoryRecords(@Nullable PathFragment directory) {
+    if (directory == null || directory.isEmpty()) {
+      return immediateWriteStatus();
+    }
+    WriteStatus existing = plainDirectoryRecords.get(directory);
+    if (existing != null) {
+      return existing;
+    }
+    // Outside computeIfAbsent, which must not recurse into its own map.
+    WriteStatus parent = writeDirectoryRecords(directory.getParentDirectory());
+    return plainDirectoryRecords.computeIfAbsent(
+        directory,
+        dir -> {
+          var data = FileInvalidationData.newBuilder();
+          String cacheKey = computeCacheKey(dir, LongVersionGetter.MINIMAL, FILE_KEY_DELIMITER);
+          KeyBytesProvider keyBytes = getKeyBytes(cacheKey, data::setOverflowKey);
+          return aggregateWriteStatuses(
+              ImmutableList.of(writer.put(keyBytes, data.build().toByteArray()), parent));
+        });
+  }
+
+  /** The path a repository's synthetic entries are keyed by: {@code external/<name>}. */
+  private static PathFragment repositoryKeyPath(String repository) {
+    return LabelConstants.EXTERNAL_REPOSITORY_LOCATION.getRelative(repository);
+  }
+
+  private long getModuleFilesVersion() throws IOException {
+    try {
+      return moduleFilesVersion.get();
+    } catch (UncheckedIOException e) {
+      throw e.getCause();
+    }
+  }
+
+  /**
+   * Returns the newest version of any module file Skyframe read from the workspace.
+   *
+   * <p>Taken from the graph rather than a glob of the workspace: the files Bazel read are exactly
+   * the ones that can have changed a repository, and walking a large workspace is not cheap.
+   */
+  private long computeModuleFilesVersion() {
+    var moduleFiles = new ConcurrentLinkedQueue<FileValueAndPath>();
+    graph.parallelForEach(
+        entry -> {
+          if (entry.getKey() instanceof FileKey fileKey
+              && entry.getValue() instanceof FileValue value) {
+            Path path = fileKey.argument().asPath();
+            if (isModuleFile(path.getBaseName()) && boundary.workspaceRelative(path) != null) {
+              moduleFiles.add(new FileValueAndPath(value, path));
+            }
+          }
+        });
+    long version = LongVersionGetter.MINIMAL;
+    try {
+      for (FileValueAndPath moduleFile : moduleFiles) {
+        version = max(version, getVersion(moduleFile.path(), moduleFile.value().exists()));
+      }
+    } catch (IOException e) {
+      throw new UncheckedIOException(e);
+    }
+    return version;
+  }
+
+  private record FileValueAndPath(FileValue value, Path path) {}
 
   private long getVersion(RootedPath rootedPath, boolean exists) throws IOException {
     return getVersion(rootedPath.asPath(), exists);
