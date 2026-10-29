@@ -59,6 +59,8 @@ public final class Bazel {
           BazelFileSystemModule.class,
           com.google.devtools.build.lib.runtime.mobileinstall.MobileInstallModule.class,
           com.google.devtools.build.lib.bazel.BazelWorkspaceStatusModule.class,
+          // Wraps the factory the next module registers, so has to come first.
+          com.google.devtools.build.lib.skycache.SkycacheDiffAwarenessModule.class,
           com.google.devtools.build.lib.bazel.BazelDiffAwarenessModule.class,
           com.google.devtools.build.lib.remote.RemoteModule.class,
           com.google.devtools.build.lib.bazel.BazelRepositoryModule.class,

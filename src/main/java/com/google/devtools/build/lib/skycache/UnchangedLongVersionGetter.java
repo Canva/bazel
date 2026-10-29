@@ -29,8 +29,8 @@ import com.google.devtools.build.lib.vfs.Path;
  * changed, which disables invalidation entirely. That is sound ONLY when the uploading and
  * downloading workspaces are known to hold identical content — the controlled condition this
  * experiment runs under. It is wrong for any real deployment: a stale entry would be served as a
- * hit. A production implementation has to derive versions from something that actually tracks
- * content, the repository's commit history being the obvious candidate.
+ * hit. {@link GitLongVersionGetter} derives versions from the commit history instead; this one is
+ * left for {@code --canva_skycache_git=}, which turns that off for measurements.
  */
 final class UnchangedLongVersionGetter implements LongVersionGetter {
 

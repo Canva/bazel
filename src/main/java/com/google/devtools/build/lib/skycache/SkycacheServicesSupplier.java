@@ -15,10 +15,12 @@ package com.google.devtools.build.lib.skycache;
 
 import static com.google.common.util.concurrent.Futures.immediateFuture;
 import static java.util.concurrent.ForkJoinPool.commonPool;
+import static java.util.stream.Collectors.joining;
 
 import build.aspect.skycache.v1.AnalysisCacheGrpc;
 import build.aspect.skycache.v1.AnalysisCacheGrpc.AnalysisCacheFutureStub;
 import com.google.auth.Credentials;
+import com.google.common.collect.ImmutableSet;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.devtools.build.lib.authandtls.AuthAndTLSOptions;
 import com.google.devtools.build.lib.authandtls.GoogleAuthUtils;
@@ -26,12 +28,16 @@ import com.google.devtools.build.lib.concurrent.safeexecutor.SafeExecutor;
 import com.google.devtools.build.lib.concurrent.safeexecutor.SafeExecutorOwner;
 import com.google.devtools.build.lib.server.FailureDetails.FailureDetail;
 import com.google.devtools.build.lib.server.FailureDetails.RemoteAnalysisCaching;
+import com.google.devtools.build.lib.compress.CompressionService;
 import com.google.devtools.build.lib.skyframe.serialization.FingerprintValueStore;
+import com.google.devtools.build.lib.skyframe.serialization.Fingerprinter;
 import com.google.devtools.build.lib.skyframe.serialization.analysis.ClientId;
 import com.google.devtools.build.lib.skyframe.serialization.analysis.RemoteAnalysisCacheMode;
+import com.google.devtools.build.lib.skyframe.serialization.analysis.RemoteAnalysisCacheClient;
 import com.google.devtools.build.lib.skyframe.serialization.analysis.RemoteAnalysisCachingOptions;
 import com.google.devtools.build.lib.skyframe.serialization.analysis.RemoteAnalysisCachingServicesOptions;
 import com.google.devtools.build.lib.skyframe.serialization.analysis.RemoteAnalysisCachingServicesSupplier;
+import com.google.devtools.build.lib.skyframe.serialization.analysis.ValidatingAnalysisCacheClient;
 import com.google.devtools.build.lib.util.SerializedAbruptExitException;
 import com.google.devtools.common.options.OptionsProvider;
 import io.grpc.CallCredentials;
@@ -73,8 +79,22 @@ final class SkycacheServicesSupplier implements RemoteAnalysisCachingServicesSup
   /** Endpoint prefix selecting {@link Phase0InMemoryStore} instead of a gRPC service. */
   private static final String IN_MEMORY_SCHEME = "inmemory://";
 
+  /**
+   * What a reader checks entries against.
+   *
+   * @param validityHorizon the version every key is written at
+   * @param clientChanges every path that differs from that version in this workspace
+   * @param compressionService decompresses invalidation data, as the writer compressed it
+   * @param fingerprinter keys invalidation data, as the writer keyed it
+   */
+  record Validation(
+      int validityHorizon,
+      ListenableFuture<ImmutableSet<String>> clientChanges,
+      CompressionService compressionService,
+      Fingerprinter fingerprinter) {}
+
   @Nullable private ManagedChannel channel;
-  @Nullable private GrpcAnalysisCacheClient client;
+  @Nullable private RemoteAnalysisCacheClient client;
   @Nullable private FingerprintValueStore store;
   @Nullable private GrpcFingerprintValueStore grpcStore;
   @Nullable private BatchingGetQueue gets;
@@ -86,6 +106,12 @@ final class SkycacheServicesSupplier implements RemoteAnalysisCachingServicesSup
 
   @Nullable private Credentials credentials;
 
+  /** Set by the module for each command that versions the workspace. */
+  @Nullable private Validation validation;
+
+  @Nullable private ValidatingAnalysisCacheClient validatingClient;
+  @Nullable private String validationSummaryAtShutdown;
+
   /**
    * Hands over what the module resolved from Bazel's own credential machinery.
    *
@@ -95,6 +121,15 @@ final class SkycacheServicesSupplier implements RemoteAnalysisCachingServicesSup
   void setCredentials(AuthAndTLSOptions authAndTlsOptions, @Nullable Credentials credentials) {
     this.authAndTlsOptions = authAndTlsOptions;
     this.credentials = credentials;
+  }
+
+  /**
+   * Has lookups checked against {@code validation}, or, if null, served as the store answers them.
+   *
+   * <p>Separate from {@link #configure} for the same reason as {@link #setCredentials}.
+   */
+  void setValidation(@Nullable Validation validation) {
+    this.validation = validation;
   }
 
   @Override
@@ -116,6 +151,7 @@ final class SkycacheServicesSupplier implements RemoteAnalysisCachingServicesSup
     if (target.startsWith(IN_MEMORY_SCHEME)) {
       // No backend and no reader: an upload runs to completion so serialization can be measured.
       store = new Phase0InMemoryStore();
+      installValidatingClient();
       return;
     }
     RemoteAnalysisCachingServicesOptions servicesOptions =
@@ -180,6 +216,27 @@ final class SkycacheServicesSupplier implements RemoteAnalysisCachingServicesSup
                 scheduler));
     store = grpcStore;
     client = new GrpcAnalysisCacheClient(gets);
+    installValidatingClient();
+  }
+
+  /**
+   * Replaces the client that strips headers without looking at them, if this command versions the
+   * workspace. Reads the same store, so lookups share the batching queue with the value reads.
+   */
+  private void installValidatingClient() {
+    if (validation == null) {
+      return;
+    }
+    validatingClient =
+        ValidatingAnalysisCacheClient.create(
+            new ValidatingAnalysisCacheClient.Storage(
+                store,
+                COMMAND_EXECUTOR,
+                validation.compressionService(),
+                validation.fingerprinter()),
+            validation.validityHorizon(),
+            validation.clientChanges());
+    client = validatingClient;
   }
 
   private static SerializedAbruptExitException abruptExit(
@@ -202,6 +259,48 @@ final class SkycacheServicesSupplier implements RemoteAnalysisCachingServicesSup
     return gets == null ? shedAtReset : gets.shed();
   }
 
+  /**
+   * Returns what the current or last command's lookups found, once, or null if none were checked.
+   *
+   * <p>Survives {@link #resetCommandState} for the same reason as {@link #shedReads}.
+   */
+  @Nullable
+  String takeValidationSummary() {
+    String summary;
+    if (validatingClient == null) {
+      summary = validationSummaryAtShutdown;
+    } else {
+      summary = summarize(validatingClient);
+      // Taken before the reset, which would otherwise keep it for the next command.
+      validatingClient = null;
+    }
+    validationSummaryAtShutdown = null;
+    return summary;
+  }
+
+  @Nullable
+  private static String summarize(ValidatingAnalysisCacheClient client) {
+    var stats = client.getValidationStats();
+    long checked = stats.hits() + stats.absent() + stats.invalidated();
+    if (checked == 0) {
+      return null;
+    }
+    String reasons =
+        client.getInvalidationReasons().entrySet().stream()
+            .map(e -> e.getKey() + ": " + e.getValue())
+            .collect(joining(", "));
+    return String.format(
+        "Analysis cache: checked %d entries: %d valid, %d not cached, %d invalidated%s",
+        checked,
+        stats.hits(),
+        stats.absent(),
+        stats.invalidated(),
+        reasons.isEmpty() ? "" : " (" + reasons + ")")
+        + (client.getFirstMissingData() == null
+            ? ""
+            : "; first failure: " + client.getFirstMissingData());
+  }
+
   @Override
   @Nullable
   public ListenableFuture<FingerprintValueStore> getFingerprintValueStore() {
@@ -210,7 +309,7 @@ final class SkycacheServicesSupplier implements RemoteAnalysisCachingServicesSup
 
   @Override
   @Nullable
-  public ListenableFuture<GrpcAnalysisCacheClient> getAnalysisCacheClient() {
+  public ListenableFuture<RemoteAnalysisCacheClient> getAnalysisCacheClient() {
     return client == null ? null : immediateFuture(client);
   }
 
@@ -227,6 +326,10 @@ final class SkycacheServicesSupplier implements RemoteAnalysisCachingServicesSup
       grpcStore.flush();
     }
     shedAtReset = gets == null ? 0 : gets.shed();
+    if (validatingClient != null) {
+      validationSummaryAtShutdown = summarize(validatingClient);
+      validatingClient = null;
+    }
     if (scheduler != null) {
       scheduler.shutdown();
       scheduler = null;
@@ -236,6 +339,7 @@ final class SkycacheServicesSupplier implements RemoteAnalysisCachingServicesSup
       channel = null;
     }
     client = null;
+    validation = null;
     store = null;
     grpcStore = null;
     gets = null;

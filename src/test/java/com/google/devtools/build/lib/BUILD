@@ -56,6 +56,7 @@ filegroup(
         "//src/test/java/com/google/devtools/build/lib/runtime:srcs",
         "//src/test/java/com/google/devtools/build/lib/sandbox:srcs",
         "//src/test/java/com/google/devtools/build/lib/server:srcs",
+        "//src/test/java/com/google/devtools/build/lib/skycache:srcs",
         "//src/test/java/com/google/devtools/build/lib/skyframe:srcs",
         "//src/test/java/com/google/devtools/build/lib/skyframe/packages:srcs",
         "//src/test/java/com/google/devtools/build/lib/skyframe/serialization:srcs",

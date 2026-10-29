@@ -1,0 +1,44 @@
+load("@rules_java//java:defs.bzl", "java_test")
+
+package(
+    default_applicable_licenses = ["//:license"],
+    default_visibility = ["//src:__subpackages__"],
+)
+
+filegroup(
+    name = "srcs",
+    srcs = glob(["**"]),
+    visibility = ["//src:__subpackages__"],
+)
+
+java_test(
+    name = "GitVersionsTest",
+    srcs = ["GitVersionsTest.java"],
+    deps = [
+        "//src/main/java/com/google/devtools/build/lib/skycache",
+        "//src/main/java/com/google/devtools/build/lib/versioning:long_version_getter",
+        "//src/main/java/com/google/devtools/build/lib/vfs",
+        "//src/main/java/com/google/devtools/build/lib/vfs/inmemoryfs",
+        "//third_party:guava",
+        "//third_party:junit4",
+        "//third_party:truth",
+    ],
+)
+
+java_test(
+    name = "WorkspaceInfoDiffAwarenessTest",
+    srcs = ["WorkspaceInfoDiffAwarenessTest.java"],
+    deps = [
+        "//src/main/java/com/google/devtools/build/lib/cmdline",
+        "//src/main/java/com/google/devtools/build/lib/skycache",
+        "//src/main/java/com/google/devtools/build/lib/skyframe:diff_awareness",
+        "//src/main/java/com/google/devtools/build/lib/skyframe:workspace_info",
+        "//src/main/java/com/google/devtools/build/lib/vfs",
+        "//src/main/java/com/google/devtools/build/lib/vfs:pathfragment",
+        "//src/main/java/com/google/devtools/build/lib/vfs/inmemoryfs",
+        "//src/main/java/com/google/devtools/common/options",
+        "//third_party:jsr305",
+        "//third_party:junit4",
+        "//third_party:truth",
+    ],
+)
