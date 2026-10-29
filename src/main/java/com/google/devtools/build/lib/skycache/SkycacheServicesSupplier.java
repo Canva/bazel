@@ -26,6 +26,7 @@ import com.google.devtools.build.lib.concurrent.safeexecutor.SafeExecutor;
 import com.google.devtools.build.lib.concurrent.safeexecutor.SafeExecutorOwner;
 import com.google.devtools.build.lib.server.FailureDetails.FailureDetail;
 import com.google.devtools.build.lib.server.FailureDetails.RemoteAnalysisCaching;
+import com.google.devtools.build.lib.skyframe.serialization.FingerprintValueStore;
 import com.google.devtools.build.lib.skyframe.serialization.analysis.ClientId;
 import com.google.devtools.build.lib.skyframe.serialization.analysis.RemoteAnalysisCacheMode;
 import com.google.devtools.build.lib.skyframe.serialization.analysis.RemoteAnalysisCachingOptions;
@@ -69,9 +70,13 @@ final class SkycacheServicesSupplier implements RemoteAnalysisCachingServicesSup
   /** Never shut down, so it outlives every command that borrows it; the common pool is shared. */
   private static final SafeExecutorOwner COMMAND_EXECUTOR = new SafeExecutorOwner(commonPool());
 
+  /** Endpoint prefix selecting {@link Phase0InMemoryStore} instead of a gRPC service. */
+  private static final String IN_MEMORY_SCHEME = "inmemory://";
+
   @Nullable private ManagedChannel channel;
   @Nullable private GrpcAnalysisCacheClient client;
-  @Nullable private GrpcFingerprintValueStore store;
+  @Nullable private FingerprintValueStore store;
+  @Nullable private GrpcFingerprintValueStore grpcStore;
   @Nullable private BatchingGetQueue gets;
   @Nullable private ScheduledExecutorService scheduler;
   private long shedAtReset;
@@ -105,8 +110,13 @@ final class SkycacheServicesSupplier implements RemoteAnalysisCachingServicesSup
     if (target == null || target.isEmpty()) {
       return;
     }
-    if (channel != null) {
+    if (channel != null || store != null) {
       return; // Already configured; flags are not allowed to change mid-command.
+    }
+    if (target.startsWith(IN_MEMORY_SCHEME)) {
+      // No backend and no reader: an upload runs to completion so serialization can be measured.
+      store = new Phase0InMemoryStore();
+      return;
     }
     RemoteAnalysisCachingServicesOptions servicesOptions =
         optionsProvider.getOptions(RemoteAnalysisCachingServicesOptions.class);
@@ -159,7 +169,7 @@ final class SkycacheServicesSupplier implements RemoteAnalysisCachingServicesSup
             deadlineMillis,
             scheduler);
 
-    store =
+    grpcStore =
         new GrpcFingerprintValueStore(
             gets,
             new BatchingPutQueue(
@@ -168,6 +178,7 @@ final class SkycacheServicesSupplier implements RemoteAnalysisCachingServicesSup
                 PUT_LINGER_MILLIS,
                 deadlineMillis,
                 scheduler));
+    store = grpcStore;
     client = new GrpcAnalysisCacheClient(gets);
   }
 
@@ -193,7 +204,7 @@ final class SkycacheServicesSupplier implements RemoteAnalysisCachingServicesSup
 
   @Override
   @Nullable
-  public ListenableFuture<GrpcFingerprintValueStore> getFingerprintValueStore() {
+  public ListenableFuture<FingerprintValueStore> getFingerprintValueStore() {
     return store == null ? null : immediateFuture(store);
   }
 
@@ -212,8 +223,8 @@ final class SkycacheServicesSupplier implements RemoteAnalysisCachingServicesSup
   public void resetCommandState() {
     // Writes are acknowledged asynchronously, so anything still queued has to leave before the
     // channel does or the build reports a successful upload it never sent.
-    if (store != null) {
-      store.flush();
+    if (grpcStore != null) {
+      grpcStore.flush();
     }
     shedAtReset = gets == null ? 0 : gets.shed();
     if (scheduler != null) {
@@ -226,6 +237,7 @@ final class SkycacheServicesSupplier implements RemoteAnalysisCachingServicesSup
     }
     client = null;
     store = null;
+    grpcStore = null;
     gets = null;
   }
 
