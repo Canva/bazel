@@ -29,6 +29,7 @@ import com.google.common.hash.HashCode;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.devtools.build.lib.actions.Artifact.ArtifactSerializationContext;
+import com.google.devtools.build.lib.actions.ArtifactFactory;
 import com.google.devtools.build.lib.analysis.BlazeDirectories;
 import com.google.devtools.build.lib.analysis.BlazeVersionInfo;
 import com.google.devtools.build.lib.analysis.config.BuildOptions;
@@ -365,7 +366,8 @@ public final class RemoteAnalysisCacheFactory {
         ImmutableClassToInstanceMap.builder()
             .put(
                 ArtifactSerializationContext.class,
-                skyframeExecutor.getSkyframeBuildView().getArtifactFactory()::getSourceArtifact)
+                deserializedSourceArtifacts(
+                    skyframeExecutor.getSkyframeBuildView().getArtifactFactory(), execRoot))
             .put(RuleClassProvider.class, ruleClassProvider)
             .put(
                 RootCodecDependencies.class,
@@ -380,6 +382,19 @@ public final class RemoteAnalysisCacheFactory {
             .put(BuildOptions.class, topLevelOptions);
 
     return new ObjectCodecs(registry, serializationDeps.build());
+  }
+
+  /**
+   * Makes source artifacts for deserialization, planting the execroot link to each one's external
+   * repository on the way. See {@link DeserializedSourceRepositoryLinks}.
+   */
+  private static ArtifactSerializationContext deserializedSourceArtifacts(
+      ArtifactFactory artifactFactory, Path execRoot) {
+    var links = new DeserializedSourceRepositoryLinks(execRoot);
+    return (execPath, root, owner) -> {
+      links.ensureLinked(execPath, root);
+      return artifactFactory.getSourceArtifact(execPath, root, owner);
+    };
   }
 
   private static ListenableFuture<ObjectCodecs> createObjectCodecs(

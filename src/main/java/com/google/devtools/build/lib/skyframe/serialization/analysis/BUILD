@@ -743,7 +743,10 @@ java_library(
 
 java_library(
     name = "remote_analysis_cache_factory",
-    srcs = ["RemoteAnalysisCacheFactory.java"],
+    srcs = [
+        "DeserializedSourceRepositoryLinks.java",
+        "RemoteAnalysisCacheFactory.java",
+    ],
     visibility = [
         "//src/main/java/com/google/devtools/build/lib/buildtool:__pkg__",
         "//src/test/java/com/google/devtools/build/lib/analysis/util:__pkg__",
@@ -790,6 +793,7 @@ java_library(
         "//src/main/java/com/google/devtools/build/lib/util:detailed_exit_code",
         "//src/main/java/com/google/devtools/build/lib/util:serialized_abrupt_exit_exception",
         "//src/main/java/com/google/devtools/build/lib/vfs",
+        "//src/main/java/com/google/devtools/build/lib/vfs:pathfragment",
         "//src/main/java/com/google/devtools/common/options",
         "//src/main/protobuf:failure_details_java_proto",
         "//third_party/java/flogger",
