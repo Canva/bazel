@@ -13,6 +13,7 @@
 // limitations under the License.
 package com.google.devtools.build.lib.skycache;
 
+import static com.google.common.base.Strings.nullToEmpty;
 import static com.google.common.util.concurrent.Futures.immediateFuture;
 import static java.util.concurrent.ForkJoinPool.commonPool;
 import static java.util.stream.Collectors.joining;
@@ -47,6 +48,7 @@ import com.google.devtools.common.options.OptionsProvider;
 import io.grpc.CallCredentials;
 import io.grpc.ManagedChannel;
 import java.io.IOException;
+import java.nio.file.Path;
 import java.time.Clock;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -102,6 +104,7 @@ final class SkycacheServicesSupplier implements RemoteAnalysisCachingServicesSup
   @Nullable private RemoteAnalysisCacheClient client;
   @Nullable private FingerprintValueStore store;
   @Nullable private GrpcFingerprintValueStore grpcStore;
+  @Nullable private LocalAnalysisStore local;
   @Nullable private BatchingGetQueue gets;
   @Nullable private ScheduledExecutorService scheduler;
   private long shedAtReset;
@@ -125,6 +128,7 @@ final class SkycacheServicesSupplier implements RemoteAnalysisCachingServicesSup
 
   @Nullable private ValidatingAnalysisCacheClient validatingClient;
   @Nullable private String validationSummaryAtShutdown;
+  @Nullable private String localStoreFailure;
 
   /**
    * Hands over what the module resolved from Bazel's own credential machinery.
@@ -170,8 +174,10 @@ final class SkycacheServicesSupplier implements RemoteAnalysisCachingServicesSup
       throws SerializedAbruptExitException {
     RemoteAnalysisCachingOptions cachingOptions =
         optionsProvider.getOptions(RemoteAnalysisCachingOptions.class);
-    String target = cachingOptions == null ? null : cachingOptions.getRemoteAnalysisCache();
-    if (target == null || target.isEmpty()) {
+    String target = cachingOptions == null ? "" : nullToEmpty(cachingOptions.getRemoteAnalysisCache());
+    SkycacheLocalOptions localOptions = optionsProvider.getOptions(SkycacheLocalOptions.class);
+    String localPath = localOptions == null ? "" : localOptions.getLocalPath();
+    if (target.isEmpty() && localPath.isEmpty()) {
       return;
     }
     if (channel != null || store != null) {
@@ -185,12 +191,56 @@ final class SkycacheServicesSupplier implements RemoteAnalysisCachingServicesSup
     }
     RemoteAnalysisCachingServicesOptions servicesOptions =
         optionsProvider.getOptions(RemoteAnalysisCachingServicesOptions.class);
-    if (authAndTlsOptions == null || servicesOptions == null) {
+    if (servicesOptions == null) {
       throw abruptExit(
-          "the analysis cache was configured before its options and credentials were resolved",
+          "the analysis cache was configured before its options were registered",
           RemoteAnalysisCaching.Code.REMOTE_ANALYSIS_CACHING_UNKNOWN);
     }
 
+    SnapshotIndex remoteIndex = target.isEmpty() ? null : connect(target, cachingOptions, servicesOptions);
+    if (!localPath.isEmpty()) {
+      try {
+        local = LocalAnalysisStore.open(Path.of(localPath), localOptions.getLocalMaxSize());
+      } catch (IOException e) {
+        throw abruptExit(
+            "opening the local analysis cache at " + localPath + ": " + e.getMessage(),
+            RemoteAnalysisCaching.Code.REMOTE_ANALYSIS_CACHING_UNKNOWN);
+      }
+    }
+    store =
+        local == null
+            ? grpcStore
+            : grpcStore == null ? local : new TieredFingerprintValueStore(local, grpcStore);
+
+    if (base != null && servicesOptions.getAnalysisCacheEnableMetadataQueries()) {
+      // Only a git-versioned command has a commit to record or look up, and only a store that
+      // outlives the server keeps an index: an in-memory one's uploads are gone with it.
+      SnapshotIndex index =
+          local == null
+              ? remoteIndex
+              : remoteIndex == null ? local : SnapshotIndex.tiered(local, remoteIndex);
+      FingerprintValueStore uploads = store;
+      snapshotIndex =
+          new SnapshotIndexClient(index, base, changes, uploads::getStats, Clock.systemUTC());
+      metadata = new SkycacheMetadata();
+    }
+    installValidatingClient();
+  }
+
+  /**
+   * Connects to the analysis cache service, setting up its store and its unvalidated client, and
+   * returns its snapshot index.
+   */
+  private SnapshotIndex connect(
+      String target,
+      RemoteAnalysisCachingOptions cachingOptions,
+      RemoteAnalysisCachingServicesOptions servicesOptions)
+      throws SerializedAbruptExitException {
+    if (authAndTlsOptions == null) {
+      throw abruptExit(
+          "the analysis cache was configured before its credentials were resolved",
+          RemoteAnalysisCaching.Code.REMOTE_ANALYSIS_CACHING_UNKNOWN);
+    }
     try {
       // Bazel's own channel builder rather than a hand-rolled one: it decides TLS from the target's
       // scheme the way --remote_cache does, applies --tls_certificate and the grpc keepalive
@@ -215,10 +265,12 @@ final class SkycacheServicesSupplier implements RemoteAnalysisCachingServicesSup
     AnalysisCacheFutureStub stub =
         AnalysisCacheGrpc.newFutureStub(channel)
             .withMaxOutboundMessageSize(MAX_OUTBOUND_MESSAGE_BYTES);
+    SnapshotIndexFutureStub snapshotStub = SnapshotIndexGrpc.newFutureStub(channel);
     CallCredentials callCredentials =
         GoogleAuthUtils.newCallCredentialsProvider(credentials).getCallCredentials();
     if (callCredentials != null) {
       stub = stub.withCallCredentials(callCredentials);
+      snapshotStub = snapshotStub.withCallCredentials(callCredentials);
     }
     long deadlineMillis = servicesOptions.getDeadline().toMillis();
 
@@ -243,21 +295,9 @@ final class SkycacheServicesSupplier implements RemoteAnalysisCachingServicesSup
                 PUT_LINGER_MILLIS,
                 deadlineMillis,
                 scheduler));
-    store = grpcStore;
+    // Strips headers without checking them; replaced when the command is git-versioned.
     client = new GrpcAnalysisCacheClient(gets);
-    if (base != null && servicesOptions.getAnalysisCacheEnableMetadataQueries()) {
-      // Only a git-versioned command has a commit to record or look up, and only the service
-      // has an index: an in-memory store's uploads are gone when the server exits.
-      SnapshotIndexFutureStub snapshotStub = SnapshotIndexGrpc.newFutureStub(channel);
-      if (callCredentials != null) {
-        snapshotStub = snapshotStub.withCallCredentials(callCredentials);
-      }
-      snapshotIndex =
-          new SnapshotIndexClient(
-              snapshotStub, base, changes, grpcStore::getStats, Clock.systemUTC());
-      metadata = new SkycacheMetadata();
-    }
-    installValidatingClient();
+    return SnapshotIndex.of(snapshotStub);
   }
 
   /**
@@ -320,6 +360,18 @@ final class SkycacheServicesSupplier implements RemoteAnalysisCachingServicesSup
     return summary;
   }
 
+  /**
+   * Returns why the last command's local writes could not be indexed, once, or null if they were.
+   *
+   * <p>Survives {@link #resetCommandState}, which is where they are indexed.
+   */
+  @Nullable
+  String takeLocalStoreFailure() {
+    String failure = localStoreFailure;
+    localStoreFailure = null;
+    return failure;
+  }
+
   @Nullable
   private static String summarize(ValidatingAnalysisCacheClient client) {
     var stats = client.getValidationStats();
@@ -380,6 +432,16 @@ final class SkycacheServicesSupplier implements RemoteAnalysisCachingServicesSup
       grpcStore.flush();
     }
     shedAtReset = gets == null ? 0 : gets.shed();
+    if (local != null) {
+      // Indexes this command's writes, after which other servers can read them.
+      try {
+        local.close();
+      } catch (IOException e) {
+        localStoreFailure = "Analysis cache: this command's writes to the local store were lost: "
+            + e.getMessage();
+      }
+      local = null;
+    }
     if (validatingClient != null) {
       validationSummaryAtShutdown = summarize(validatingClient);
       validatingClient = null;

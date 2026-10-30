@@ -80,7 +80,7 @@ public final class SnapshotIndexClientTest {
       channel = InProcessChannelBuilder.forName(name).directExecutor().build();
     }
     return new SnapshotIndexClient(
-        SnapshotIndexGrpc.newFutureStub(channel),
+        SnapshotIndex.of(SnapshotIndexGrpc.newFutureStub(channel)),
         new GitVersions.Base(commit, ordinal),
         immediateFuture(changes),
         SnapshotIndexClientTest::stats,

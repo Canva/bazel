@@ -14,6 +14,7 @@
 package com.google.devtools.build.lib.skycache;
 
 import com.google.auth.Credentials;
+import static com.google.common.base.Strings.nullToEmpty;
 import static com.google.common.util.concurrent.Futures.immediateFailedFuture;
 import static com.google.common.util.concurrent.Futures.immediateFuture;
 import static com.google.common.util.concurrent.MoreExecutors.directExecutor;
@@ -139,7 +140,8 @@ public final class SkycacheModule extends SerializationModule {
         ? ImmutableList.of(
             AuthAndTLSOptions.class,
             RemoteAnalysisCachingServicesOptions.class,
-            SkycacheGitOptions.class)
+            SkycacheGitOptions.class,
+            SkycacheLocalOptions.class)
         : ImmutableList.of();
   }
 
@@ -172,10 +174,11 @@ public final class SkycacheModule extends SerializationModule {
     // same flag the supplier does and a stock build keeps the assertion.
     RemoteAnalysisCachingOptions options =
         env.getOptions().getOptions(RemoteAnalysisCachingOptions.class);
+    SkycacheLocalOptions localOptions = env.getOptions().getOptions(SkycacheLocalOptions.class);
     boolean enabled =
         options != null
-            && options.getRemoteAnalysisCache() != null
-            && !options.getRemoteAnalysisCache().isEmpty();
+            && (!nullToEmpty(options.getRemoteAnalysisCache()).isEmpty()
+                || (localOptions != null && !localOptions.getLocalPath().isEmpty()));
     FileDependencySerializer.setTolerateAbsoluteSymlinks(enabled);
     // Paths under external/ are versioned through the module files rather than followed; see
     // RepositoryBoundary. Like the above, a stock build keeps the serializer's original behaviour.
@@ -189,6 +192,9 @@ public final class SkycacheModule extends SerializationModule {
             : null);
     if (!enabled) {
       return;
+    }
+    if (localOptions != null && !localOptions.getLocalPath().isEmpty()) {
+      checkLocalPath(env, localOptions.getLocalPath());
     }
     SkycacheGitOptions gitOptions = env.getOptions().getOptions(SkycacheGitOptions.class);
     if (gitOptions != null && !gitOptions.getGit().isEmpty() && env.getWorkspace() != null) {
@@ -322,6 +328,8 @@ public final class SkycacheModule extends SerializationModule {
     }
     pendingGit.clear();
     workspaceInfo = null;
+    // Resets the supplier first, since that is what flushes writes and indexes local ones.
+    super.afterCommand();
     long shed = supplier.shedReads();
     if (shed > 0 && eventHandler != null) {
       // Shed reads are answered as misses, so the build is correct but quietly less cached than it
@@ -338,8 +346,51 @@ public final class SkycacheModule extends SerializationModule {
     if (validation != null && eventHandler != null) {
       eventHandler.handle(Event.info(validation));
     }
+    String localFailure = supplier.takeLocalStoreFailure();
+    if (localFailure != null && eventHandler != null) {
+      eventHandler.handle(Event.warn(localFailure));
+    }
     eventHandler = null;
-    super.afterCommand();
+  }
+
+  /**
+   * Refuses a local store inside the workspace.
+   *
+   * <p>Inside, its writes would be workspace changes: under EdenFS they materialize every segment
+   * in the overlay, and a glob or {@code git status} would walk them.
+   */
+  private static void checkLocalPath(CommandEnvironment env, String localPath)
+      throws AbruptExitException {
+    java.nio.file.Path path = java.nio.file.Path.of(localPath);
+    if (!path.isAbsolute()) {
+      throw abruptExit("--canva_skycache_local_path must be absolute: " + localPath);
+    }
+    if (env.getWorkspace() == null) {
+      return;
+    }
+    java.nio.file.Path workspace = java.nio.file.Path.of(env.getWorkspace().getPathString());
+    if (realPrefix(path).startsWith(realPrefix(workspace))) {
+      throw abruptExit(
+          String.format(
+              "--canva_skycache_local_path %s is inside the workspace %s; put it outside, such as"
+                  + " under ~/.cache",
+              localPath, workspace));
+    }
+  }
+
+  /** Resolves the longest existing prefix of {@code path}, so a store yet to be made resolves. */
+  private static java.nio.file.Path realPrefix(java.nio.file.Path path) {
+    java.nio.file.Path existing = path.normalize();
+    java.nio.file.Path rest = existing.getFileSystem().getPath("");
+    while (existing != null) {
+      try {
+        return existing.toRealPath().resolve(rest);
+      } catch (IOException e) {
+        rest = existing.getFileName().resolve(rest);
+        existing = existing.getParent();
+      }
+    }
+    return path.normalize();
   }
 
   private static AbruptExitException abruptExit(String message) {

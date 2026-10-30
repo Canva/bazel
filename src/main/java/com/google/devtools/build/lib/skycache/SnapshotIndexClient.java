@@ -19,7 +19,6 @@ import com.canva.skycache.v1.LookupSnapshotRequest;
 import com.canva.skycache.v1.LookupSnapshotResponse;
 import com.canva.skycache.v1.RecordSnapshotRequest;
 import com.canva.skycache.v1.Snapshot;
-import com.canva.skycache.v1.SnapshotIndexGrpc.SnapshotIndexFutureStub;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.util.concurrent.ListenableFuture;
@@ -31,6 +30,7 @@ import com.google.devtools.build.lib.skyframe.serialization.analysis.RemoteAnaly
 import com.google.devtools.build.lib.skyframe.serialization.analysis.ValidatingAnalysisCacheClient;
 import com.google.devtools.build.lib.skyframe.serialization.analysis.proto.TopLevelTargetsMatchStatus;
 import io.grpc.Status;
+import io.grpc.StatusRuntimeException;
 import java.io.IOException;
 import java.time.Clock;
 import java.util.Collection;
@@ -39,7 +39,7 @@ import java.util.concurrent.TimeoutException;
 import java.util.function.Supplier;
 
 /**
- * The service's record of which uploads exist: one snapshot per Bazel install, top-level
+ * Asks the {@link SnapshotIndex} which uploads exist: one snapshot per Bazel install, top-level
  * configuration and mainline commit the priming pipeline has uploaded.
  *
  * <p>A writer records its upload once every entry is acknowledged, so a reader never finds a
@@ -56,7 +56,7 @@ final class SnapshotIndexClient
   /** Suffix keeping stamped uploads apart from unstamped ones, which the keys also separate. */
   private static final String STAMPED_SUFFIX = "+stamped";
 
-  private final SnapshotIndexFutureStub stub;
+  private final SnapshotIndex index;
   private final GitVersions.Base base;
   private final ListenableFuture<ImmutableSet<String>> changes;
   private final Supplier<FingerprintValueStore.Stats> uploadStats;
@@ -68,12 +68,12 @@ final class SnapshotIndexClient
    * @param uploadStats what the command's store has sent, for the snapshot's statistics
    */
   SnapshotIndexClient(
-      SnapshotIndexFutureStub stub,
+      SnapshotIndex index,
       GitVersions.Base base,
       ListenableFuture<ImmutableSet<String>> changes,
       Supplier<FingerprintValueStore.Stats> uploadStats,
       Clock clock) {
-    this.stub = stub;
+    this.index = index;
     this.base = base;
     this.changes = changes;
     this.uploadStats = uploadStats;
@@ -131,12 +131,12 @@ final class SnapshotIndexClient
             .build();
     try {
       var unused =
-          stub.withDeadlineAfter(SkycacheMetadataParams.TIMEOUT.toMillis(), MILLISECONDS)
+          index
               .record(RecordSnapshotRequest.newBuilder().setSnapshot(snapshot).build())
-              .get();
-    } catch (ExecutionException e) {
+              .get(SkycacheMetadataParams.TIMEOUT.toMillis(), MILLISECONDS);
+    } catch (ExecutionException | TimeoutException e) {
       throw new IOException(
-          "recording snapshot of commit " + base.commit() + ": " + Status.fromThrowable(e), e);
+          "recording snapshot of commit " + base.commit() + ": " + describe(e), e);
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
       throw new IOException("interrupted recording snapshot of commit " + base.commit(), e);
@@ -154,7 +154,7 @@ final class SnapshotIndexClient
     LookupSnapshotResponse response;
     try {
       response =
-          stub.withDeadlineAfter(SkycacheMetadataParams.TIMEOUT.toMillis(), MILLISECONDS)
+          index
               .lookup(
                   LookupSnapshotRequest.newBuilder()
                       .setBazelInstallMd5(installMd5(bazelVersion))
@@ -232,6 +232,12 @@ final class SnapshotIndexClient
   @VisibleForTesting
   static String configurationKey(String configurationHash, boolean useFakeStampData) {
     return useFakeStampData ? configurationHash : configurationHash + STAMPED_SUFFIX;
+  }
+
+  private static String describe(Exception e) {
+    Throwable cause = e instanceof ExecutionException ? e.getCause() : e;
+    return cause instanceof StatusRuntimeException ? Status.fromThrowable(cause).toString()
+        : String.valueOf(cause.getMessage());
   }
 
   private static LookupTopLevelTargetsResult result(

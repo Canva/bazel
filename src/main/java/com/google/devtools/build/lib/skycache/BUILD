@@ -66,6 +66,7 @@ java_library(
         "//src/main/protobuf:snapshot_index_java_proto",
         "//src/main/protobuf:file_invalidation_data_java_proto",
         "//third_party/grpc-java:grpc-jar",
+        "//third_party/java/error_prone:annotations",
         "//third_party:auth",
         "//third_party:guava",
         "//third_party:jsr305",
