@@ -37,6 +37,7 @@ import com.google.devtools.build.lib.events.Event;
 import com.google.devtools.build.lib.events.ExtendedEventHandler;
 import com.google.devtools.build.lib.runtime.BlazeRuntime;
 import com.google.devtools.build.lib.runtime.CommandEnvironment;
+import com.google.devtools.build.lib.runtime.ServerBuilder;
 import com.google.devtools.build.lib.runtime.WorkspaceBuilder;
 import com.google.devtools.build.lib.server.FailureDetails.FailureDetail;
 import com.google.devtools.build.lib.server.FailureDetails.RemoteAnalysisCaching;
@@ -53,6 +54,7 @@ import com.google.devtools.build.lib.util.AbruptExitException;
 import com.google.devtools.build.lib.util.DetailedExitCode;
 import com.google.devtools.build.skyframe.IntVersion;
 import com.google.devtools.common.options.OptionsBase;
+import com.google.devtools.common.options.OptionsParsingResult;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
@@ -116,6 +118,11 @@ public final class SkycacheModule extends SerializationModule {
   protected RemoteAnalysisCachingServicesSupplier getAnalysisCachingServicesSupplier(
       BlazeRuntime runtime) {
     return supplier;
+  }
+
+  @Override
+  public void serverInit(OptionsParsingResult startupOptions, ServerBuilder builder) {
+    builder.addInfoItems(new SkycacheInfoItems.Enabled(), new SkycacheInfoItems.InstallMd5());
   }
 
   @Override
