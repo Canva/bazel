@@ -283,13 +283,17 @@ public final class ValidatingAnalysisCacheClient implements RemoteAnalysisCacheC
           case DATA_TYPE_LISTING ->
               isUnchanged(
                   deserializer.getListingDependencies(codedIn.readString(), store), validator);
-          case DATA_TYPE_ANALYSIS_NODE, DATA_TYPE_EXECUTION_NODE -> {
+          case DATA_TYPE_ANALYSIS_NODE -> {
             PackedFingerprint nested = PackedFingerprint.readFrom(codedIn);
             invalidationFingerprint = nested.toBytes();
-            yield isUnchanged(
-                deserializer.getNestedDependencies(nested, store),
-                /* sourceChangesInvalidate= */ dataType == DataType.DATA_TYPE_EXECUTION_NODE,
-                validator);
+            yield isUnchanged(deserializer.getNestedDependencies(nested, store), validator);
+          }
+          case DATA_TYPE_EXECUTION_NODE -> {
+            // Analysis only. An execution value's output metadata describes files in the writer's
+            // output base, and Bazel's executor has no analysis-only mode to keep them out of an
+            // upload: a hit would skip the action and leave its outputs nowhere.
+            countReason("execution value");
+            yield immediateFuture(false);
           }
           default -> throw new IOException("unexpected data type " + dataType);
         };
@@ -377,13 +381,11 @@ public final class ValidatingAnalysisCacheClient implements RemoteAnalysisCacheC
   /**
    * Matches nested dependencies.
    *
-   * @param sourceChangesInvalidate whether a change to the entry's source file, which only
-   *     execution consumes, invalidates it. An analysis value does not depend on source contents.
+   * <p>A change to the entry's source file, which only execution consumes, does not invalidate
+   * it: an analysis value does not depend on source contents.
    */
   private ListenableFuture<Boolean> isUnchanged(
-      NestedDependenciesOrFuture dependencies,
-      boolean sourceChangesInvalidate,
-      VersionedChangesValidator validator) {
+      NestedDependenciesOrFuture dependencies, VersionedChangesValidator validator) {
     ListenableFuture<NestedDependencies> future =
         switch (dependencies) {
           case NestedDependencies done -> immediateFuture(done);
@@ -402,7 +404,7 @@ public final class ValidatingAnalysisCacheClient implements RemoteAnalysisCacheC
                 boolean valid =
                     switch (result) {
                       case NoMatch unused -> true;
-                      case SourceMatch unused -> !sourceChangesInvalidate;
+                      case SourceMatch unused -> true;
                       default -> false;
                     };
                 if (!valid) {

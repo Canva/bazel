@@ -126,6 +126,8 @@ java_test(
     srcs = ["SkycacheExecutionIntegrationTest.java"],
     tags = ["no_windows"],
     deps = [
+        "//src/main/java/com/google/devtools/build/lib/actions:action_lookup_data",
+        "//src/main/java/com/google/devtools/build/skyframe:skyframe-objects",
         "//src/main/java/com/google/devtools/build/lib/cmdline",
         "//src/main/java/com/google/devtools/build/lib/compress:compression_service",
         "//src/main/java/com/google/devtools/build/lib/compress:compression_service_impl",

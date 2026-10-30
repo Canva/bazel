@@ -185,7 +185,7 @@ public final class ValidatingAnalysisCacheClientTest {
   }
 
   @Test
-  public void nestedDependencies_sourceChangesInvalidateOnlyExecution() throws Exception {
+  public void nestedDependencies_sourceChangesDoNotInvalidateAnalysis() throws Exception {
     FileKey build = workspaceFile("pkg/BUILD", 50);
     FileKey defs = workspaceFile("pkg/defs.bzl", 60);
     FileKey source = workspaceFile("pkg/main.cc", 70);
@@ -194,18 +194,26 @@ public final class ValidatingAnalysisCacheClientTest {
             AbstractNestedFileOpNodes.from(ImmutableSet.<FileOpNode>of(build, defs), source);
     PackedFingerprint nodeKey = nodeInfo(nested).cacheKey();
     ByteString analysis = putEntry(DATA_TYPE_ANALYSIS_NODE, nodeKey);
-    ByteString execution = putEntry(DATA_TYPE_EXECUTION_NODE, nodeKey);
 
-    var sourceEdit = ImmutableList.of("pkg/main.cc");
-    assertHit(analysis, ImmutableList.of(), sourceEdit);
-    assertInvalidated(execution, ImmutableList.of(), sourceEdit);
-
-    var defsEdit = ImmutableList.of(new DepotChange("pkg/defs.bzl", 101));
-    assertInvalidated(analysis, defsEdit, ImmutableList.of());
-    assertInvalidated(execution, defsEdit, ImmutableList.of());
-
+    assertHit(analysis, ImmutableList.of(), ImmutableList.of("pkg/main.cc"));
+    assertInvalidated(
+        analysis, ImmutableList.of(new DepotChange("pkg/defs.bzl", 101)), ImmutableList.of());
     assertHit(analysis, ImmutableList.of(), ImmutableList.of());
-    assertHit(execution, ImmutableList.of(), ImmutableList.of());
+  }
+
+  @Test
+  public void executionValues_areAlwaysMisses() throws Exception {
+    FileKey build = workspaceFile("pkg/BUILD", 50);
+    FileKey defs = workspaceFile("pkg/defs.bzl", 60);
+    var nested =
+        (AbstractNestedFileOpNodes)
+            AbstractNestedFileOpNodes.from(
+                ImmutableSet.<FileOpNode>of(build, defs), /* sourceFile= */ null);
+    ByteString execution = putEntry(DATA_TYPE_EXECUTION_NODE, nodeInfo(nested).cacheKey());
+
+    var client = client(ImmutableList.of(), ImmutableList.of());
+    assertThat(lookup(client, execution)).isEmpty();
+    assertThat(client.getInvalidationReasons()).containsExactly("execution value", 1L);
   }
 
   @Test

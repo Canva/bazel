@@ -21,6 +21,7 @@ import static java.util.concurrent.ForkJoinPool.commonPool;
 import com.google.common.collect.ImmutableList;
 import com.google.common.eventbus.Subscribe;
 import com.google.common.util.concurrent.ListenableFuture;
+import com.google.devtools.build.lib.actions.ActionLookupData;
 import com.google.devtools.build.lib.buildtool.util.BuildIntegrationTestCase;
 import com.google.devtools.build.lib.cmdline.LabelConstants;
 import com.google.devtools.build.lib.compress.CompressionService;
@@ -203,10 +204,16 @@ public final class SkycacheExecutionIntegrationTest extends BuildIntegrationTest
   }
 
   private void upload(String target) throws Exception {
+    upload(target, /* execute= */ false);
+  }
+
+  /**
+   * @param execute whether the upload builds as well, which also serializes execution values whose
+   *     outputs exist only in the writer's output base
+   */
+  private void upload(String target, boolean execute) throws Exception {
     getSkyframeExecutor().resetEvaluator();
-    // Analysis only, as uploads are made: an upload from a build that executed also serializes
-    // execution values, whose outputs exist only in the writer's output base.
-    addOptions("--experimental_remote_analysis_cache_mode=upload", "--nobuild");
+    addOptions("--experimental_remote_analysis_cache_mode=upload", execute ? "--build" : "--nobuild");
     buildTarget(target);
     addOptions("--build");
     assertThat(getCommandEnvironment().getRemoteAnalysisCachingEventListener().getSerializedKeys())
@@ -412,6 +419,22 @@ public final class SkycacheExecutionIntegrationTest extends BuildIntegrationTest
   public void treeArtifact_everythingCached() throws Exception {
     writeTreeScenario();
     upload("//consumer:c");
+
+    download("//consumer:c");
+
+    assertThat(output("consumer", "c.txt")).isEqualTo("a.txt\nb.txt\n");
+  }
+
+  @Test
+  public void uploadThatExecuted_readerStillRunsTheActions() throws Exception {
+    writeTreeScenario();
+    upload("//consumer:c", /* execute= */ true);
+    assertWithMessage("expected the upload to carry execution values")
+        .that(
+            getCommandEnvironment().getRemoteAnalysisCachingEventListener().getSerializedKeys()
+                .stream()
+                .anyMatch(ActionLookupData.class::isInstance))
+        .isTrue();
 
     download("//consumer:c");
 
