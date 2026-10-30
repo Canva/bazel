@@ -19,6 +19,7 @@ import static com.google.common.util.concurrent.Futures.immediateFuture;
 import static java.util.concurrent.ForkJoinPool.commonPool;
 
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableSet;
 import com.google.common.eventbus.Subscribe;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.devtools.build.lib.actions.ActionLookupData;
@@ -53,16 +54,30 @@ import org.junit.runners.JUnit4;
 @RunWith(JUnit4.class)
 public final class SkycacheExecutionIntegrationTest extends BuildIntegrationTestCase {
 
+  /** Version of every source, and the bound uploads are held to unless a test lifts it. */
+  private static final long COMMITTED = 1;
+
+  /** As the git version getter answers a path the working tree changed. */
+  private static final long UNCOMMITTED = Long.MAX_VALUE;
+
+  /** Workspace-relative paths the writer has changed without committing. */
+  private static volatile ImmutableSet<String> uncommitted = ImmutableSet.of();
+
   private static final LongVersionGetter VERSIONS =
       new LongVersionGetter() {
         @Override
         public long getFilePathOrSymlinkVersion(Path path) {
-          return 1;
+          for (String changed : uncommitted) {
+            if (path.getPathString().endsWith("/" + changed)) {
+              return UNCOMMITTED;
+            }
+          }
+          return COMMITTED;
         }
 
         @Override
         public long getDirectoryListingVersion(Path path) {
-          return 1;
+          return COMMITTED;
         }
 
         @Override
@@ -80,6 +95,8 @@ public final class SkycacheExecutionIntegrationTest extends BuildIntegrationTest
   public void resetSerializer() {
     FileDependencySerializer.setTolerateAbsoluteSymlinks(false);
     FileDependencySerializer.setRepositoryBoundary(null);
+    FileDependencySerializer.setMaxDependencyVersion(FileDependencySerializer.UNBOUNDED);
+    uncommitted = ImmutableSet.of();
   }
 
   @Before
@@ -97,6 +114,7 @@ public final class SkycacheExecutionIntegrationTest extends BuildIntegrationTest
         new FileDependencySerializer.RepositoryBoundary(
             getWorkspace(),
             getOutputBase().getRelative(LabelConstants.EXTERNAL_REPOSITORY_LOCATION)));
+    FileDependencySerializer.setMaxDependencyVersion(COMMITTED);
     addOptions("--experimental_frontier_violation_check=disabled_for_testing");
   }
 
@@ -350,6 +368,29 @@ public final class SkycacheExecutionIntegrationTest extends BuildIntegrationTest
         "mid(name = 'one', deps = [':leaf'])",
         "mid(name = 'two', deps = [':leaf'])",
         "top(name = 'top', deps = [':one', ':two'])");
+  }
+
+  @Test
+  public void uncommittedChange_writerLeavesOutWhatItReaches() throws Exception {
+    write("clean/BUILD", "genrule(name = 'a', outs = ['a.txt'], cmd = 'echo a > $@')");
+    write(
+        "dirty/BUILD",
+        "genrule(name = 'b', srcs = ['//clean:a'], outs = ['b.txt'], cmd = 'cp $< $@')");
+    uncommitted = ImmutableSet.of("dirty/BUILD");
+    upload("//dirty:b");
+
+    // A reader at the same version without the writer's edit: nothing in its own changes would
+    // invalidate //dirty:b, so only leaving it out keeps it from being served.
+    uncommitted = ImmutableSet.of();
+    download("//dirty:b");
+
+    var hits =
+        getCommandEnvironment().getRemoteAnalysisCachingEventListener().getCacheHits().stream()
+            .map(Object::toString)
+            .toList();
+    assertThat(hits.stream().anyMatch(key -> key.contains("//clean:a"))).isTrue();
+    assertThat(hits.stream().noneMatch(key -> key.contains("//dirty:b"))).isTrue();
+    assertThat(output("dirty", "b.txt")).isEqualTo("a\n");
   }
 
   @Test

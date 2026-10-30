@@ -14,12 +14,14 @@
 package com.google.devtools.build.lib.skycache;
 
 import static com.google.common.truth.Truth.assertThat;
+import static com.google.common.util.concurrent.Futures.immediateFuture;
 import static org.junit.Assert.assertThrows;
 
 import com.canva.skycache.v1.LookupSnapshotRequest;
 import com.canva.skycache.v1.LookupSnapshotResponse;
 import com.canva.skycache.v1.SnapshotIndexGrpc;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableSet;
 import com.google.devtools.build.lib.skyframe.serialization.FingerprintValueStore;
 import com.google.devtools.build.lib.util.Bucket;
 import com.google.devtools.build.lib.skyframe.serialization.analysis.LookupTopLevelTargetsResult;
@@ -62,6 +64,12 @@ public final class SnapshotIndexClientTest {
 
   private SnapshotIndexClient client(String commit, int ordinal, boolean withIndex)
       throws IOException {
+    return client(commit, ordinal, withIndex, ImmutableSet.of());
+  }
+
+  private SnapshotIndexClient client(
+      String commit, int ordinal, boolean withIndex, ImmutableSet<String> changes)
+      throws IOException {
     if (channel == null) {
       String name = InProcessServerBuilder.generateName();
       var builder = InProcessServerBuilder.forName(name).directExecutor();
@@ -74,6 +82,7 @@ public final class SnapshotIndexClientTest {
     return new SnapshotIndexClient(
         SnapshotIndexGrpc.newFutureStub(channel),
         new GitVersions.Base(commit, ordinal),
+        immediateFuture(changes),
         SnapshotIndexClientTest::stats,
         CLOCK);
   }
@@ -194,6 +203,26 @@ public final class SnapshotIndexClientTest {
                     ImmutableList.of(),
                     ImmutableList.of()));
     assertThat(thrown).hasMessageThat().contains("versioned at 41");
+    assertThat(index.size()).isEqualTo(0);
+  }
+
+  @Test
+  public void record_ofAModifiedWorkingTree_fails() throws Exception {
+    var client = client("abc123", 40, true, ImmutableSet.of("pkg/BUILD"));
+
+    var thrown =
+        assertThrows(
+            IOException.class,
+            () ->
+                client.addTopLevelTargets(
+                    "invocation",
+                    40,
+                    CONFIG,
+                    true,
+                    BAZEL_VERSION,
+                    ImmutableList.of(),
+                    ImmutableList.of()));
+    assertThat(thrown).hasMessageThat().contains("starting with pkg/BUILD");
     assertThat(index.size()).isEqualTo(0);
   }
 

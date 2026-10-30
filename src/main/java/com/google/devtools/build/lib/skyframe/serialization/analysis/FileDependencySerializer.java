@@ -135,6 +135,31 @@ public final class FileDependencySerializer {
     tolerateAbsoluteSymlinks = tolerate;
   }
 
+  /** No bound on the versions an uploaded entry may depend on: a stock build's behaviour. */
+  public static final long UNBOUNDED = Long.MAX_VALUE;
+
+  /**
+   * Leaves out of an upload every entry depending on a source newer than this version.
+   *
+   * <p>A key is the evaluating version and the SkyKey, so it claims the value is what that version
+   * produces. That holds only if every source the value read is at or before it: with this set to
+   * the evaluating version, a version getter that answers an uncommitted change with a later
+   * version makes an upload from a modified workspace sound, by dropping exactly the entries the
+   * modification reached.
+   *
+   * <p>Set per command, like {@link #tolerateAbsoluteSymlinks}, so a stock build uploads every
+   * entry as before.
+   */
+  private static volatile long maxDependencyVersion = UNBOUNDED;
+
+  public static void setMaxDependencyVersion(long version) {
+    maxDependencyVersion = version;
+  }
+
+  static long maxDependencyVersion() {
+    return maxDependencyVersion;
+  }
+
   /**
    * Counters for the progress of serialization.
    *
@@ -398,7 +423,10 @@ public final class FileDependencySerializer {
       var info =
           new NodeInvalidationDataInfo(
               PackedFingerprint.fromBytes(node.fingerprint().toByteArray()),
-              WriteStatuses.immediateWriteStatus());
+              WriteStatuses.immediateWriteStatus(),
+              // Read from the cache and checked against this workspace's changes, so nothing it
+              // depends on differs from the version it was read at.
+              LongVersionGetter.MINIMAL);
       node.setSerializationScratch(info);
       return info;
     }
@@ -973,7 +1001,8 @@ public final class FileDependencySerializer {
                   writeStatus);
             }
             writeStatuses.add(writeStatus);
-            return new ListingInvalidationDataInfo(cacheKey, aggregateWriteStatuses(writeStatuses));
+            return new ListingInvalidationDataInfo(
+                cacheKey, aggregateWriteStatuses(writeStatuses), mtsv);
           },
           directExecutor());
     }
@@ -1010,6 +1039,9 @@ public final class FileDependencySerializer {
     private final ArrayList<String> listingKeys = new ArrayList<>();
     private final ArrayList<NodeInvalidationDataInfo> nodeDependencies = new ArrayList<>();
     @Nullable private FileDataInfoOrFuture sourceFileOrFuture;
+
+    /** The greatest MTSV among the dependencies added so far; confined like {@link #fileKeys}. */
+    private long mtsv = LongVersionGetter.MINIMAL;
 
     private final WriteStatusBuilder writeStatusBuilder = new WriteStatusBuilder();
 
@@ -1138,7 +1170,7 @@ public final class FileDependencySerializer {
       }
 
       writeStatusBuilder.add(writeStatus);
-      return new NodeInvalidationDataInfo(key, writeStatusBuilder.build());
+      return new NodeInvalidationDataInfo(key, writeStatusBuilder.build(), mtsv);
     }
 
     @Override
@@ -1168,6 +1200,7 @@ public final class FileDependencySerializer {
         case FileInvalidationDataInfo fileInfo -> {
           fileKeys.add(fileInfo.cacheKey());
           writeStatusBuilder.add(fileInfo.writeStatus());
+          updateMtsv(fileInfo.mtsv());
         }
       }
     }
@@ -1188,6 +1221,7 @@ public final class FileDependencySerializer {
         case ListingInvalidationDataInfo listingInfo -> {
           listingKeys.add(listingInfo.cacheKey());
           writeStatusBuilder.add(listingInfo.writeStatus());
+          updateMtsv(listingInfo.mtsv());
         }
       }
     }
@@ -1208,7 +1242,14 @@ public final class FileDependencySerializer {
         case NodeInvalidationDataInfo nodeInfo -> {
           nodeDependencies.add(nodeInfo);
           writeStatusBuilder.add(nodeInfo.writeStatus());
+          updateMtsv(nodeInfo.mtsv());
         }
+      }
+    }
+
+    private void updateMtsv(long version) {
+      if (version > mtsv) {
+        mtsv = version;
       }
     }
 
@@ -1268,6 +1309,7 @@ public final class FileDependencySerializer {
         case CONSTANT_FILE -> null;
         case FileInvalidationDataInfo fileInfo -> {
           writeStatusBuilder.add(fileInfo.writeStatus());
+          updateMtsv(fileInfo.mtsv());
           yield fileInfo.cacheKey();
         }
       };
@@ -1459,7 +1501,8 @@ public final class FileDependencySerializer {
                 aggregateWriteStatuses(
                     ImmutableList.of(
                         writer.put(keyBytes, data.build().toByteArray()),
-                        writeDirectoryRecords(workspacePath)))));
+                        writeDirectoryRecords(workspacePath))),
+                mtsv));
       }
     }
     try {
@@ -1512,7 +1555,8 @@ public final class FileDependencySerializer {
               cacheKey,
               aggregateWriteStatuses(
                   ImmutableList.of(
-                      writer.put(keyBytes, data.build().toByteArray()), fileData.writeStatus())));
+                      writer.put(keyBytes, data.build().toByteArray()), fileData.writeStatus())),
+              version);
         });
   }
 

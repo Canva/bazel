@@ -18,6 +18,8 @@ import static com.google.common.util.concurrent.Futures.immediateFuture;
 import static org.junit.Assert.assertThrows;
 
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
+import com.google.devtools.build.lib.skycache.GitLongVersionGetter.Uncommitted;
 import com.google.devtools.build.lib.skycache.GitVersions.Base;
 import com.google.devtools.build.lib.skycache.GitVersions.History;
 import com.google.devtools.build.lib.versioning.LongVersionGetter;
@@ -140,26 +142,12 @@ public final class GitVersionsTest {
   }
 
   @Test
-  public void checkClean() throws Exception {
-    String[] commits = linearHistory();
-    Base base = GitVersions.resolveBase(git, "main", "");
-    GitVersions.checkClean(git, base);
-
-    write("untracked", "1");
-    assertThat(assertThrows(IOException.class, () -> GitVersions.checkClean(git, base)))
-        .hasMessageThat()
-        .contains("1 local changes, starting with untracked");
-
-    Files.delete(root.resolve("untracked"));
+  public void changedPaths_ignoresIgnoredFiles() throws Exception {
     write(".gitignore", "ignored\n");
     commit("ignore");
     write("ignored", "1");
-    GitVersions.checkClean(git, GitVersions.resolveBase(git, "main", ""));
 
-    git.run("checkout", "--quiet", commits[1]);
-    assertThat(assertThrows(IOException.class, () -> GitVersions.checkClean(git, base)))
-        .hasMessageThat()
-        .contains("not the mainline commit " + commits[2]);
+    assertThat(GitVersions.changedPaths(git, GitVersions.resolveBase(git, "main", ""))).isEmpty();
   }
 
   @Test
@@ -230,6 +218,45 @@ public final class GitVersionsTest {
   }
 
   @Test
+  public void changedListings_onlyAdditionsDeletionsAndRetypes() throws Exception {
+    write("a/edited", "1");
+    write("a/deleted", "1");
+    write("b/retyped", "1");
+    write("c/kept", "1");
+    commit("first");
+    Base base = GitVersions.resolveBase(git, "main", "");
+    write("a/edited", "2");
+    Files.delete(root.resolve("a/deleted"));
+    Files.delete(root.resolve("b/retyped"));
+    Files.createSymbolicLink(root.resolve("b/retyped"), root.resolve("c/kept"));
+    write("d/e/added", "1");
+
+    var changed = GitVersions.changedPaths(git, base);
+    assertThat(GitVersions.changedListings(git, base, changed))
+        .containsExactly("a", "b", "", "d", "d/e");
+  }
+
+  @Test
+  public void versionGetter_uncommittedChangesArePastEveryCommit() throws Exception {
+    FileSystem fs = new InMemoryFileSystem(DigestHashFunction.SHA256);
+    Path workspace = fs.getPath("/ws");
+    var getter =
+        new GitLongVersionGetter(
+            workspace,
+            immediateFuture(new History(10, ImmutableMap.of("a/x", 12), ImmutableMap.of())),
+            immediateFuture(
+                new Uncommitted(ImmutableSet.of("a/x", "a/gone"), ImmutableSet.of("a"))));
+
+    assertThat(getter.getFilePathOrSymlinkVersion(workspace.getRelative("a/x")))
+        .isEqualTo(GitLongVersionGetter.UNCOMMITTED);
+    assertThat(getter.getNonexistentPathVersion(workspace.getRelative("a/gone")))
+        .isEqualTo(GitLongVersionGetter.UNCOMMITTED);
+    assertThat(getter.getDirectoryListingVersion(workspace.getRelative("a")))
+        .isEqualTo(GitLongVersionGetter.UNCOMMITTED);
+    assertThat(getter.getFilePathOrSymlinkVersion(workspace.getRelative("a/y"))).isEqualTo(10);
+  }
+
+  @Test
   public void versionGetter() throws Exception {
     FileSystem fs = new InMemoryFileSystem(DigestHashFunction.SHA256);
     Path workspace = fs.getPath("/ws");
@@ -238,7 +265,9 @@ public final class GitVersionsTest {
             /* windowStart= */ 10,
             ImmutableMap.of("a/x", 12, "gone", 11),
             ImmutableMap.of("a", 12));
-    var getter = new GitLongVersionGetter(workspace, immediateFuture(history));
+    var getter =
+        new GitLongVersionGetter(
+            workspace, immediateFuture(history), immediateFuture(Uncommitted.NONE));
 
     assertThat(getter.getFilePathOrSymlinkVersion(workspace.getRelative("a/x"))).isEqualTo(12);
     assertThat(getter.getFilePathOrSymlinkVersion(workspace.getRelative("a/old"))).isEqualTo(10);

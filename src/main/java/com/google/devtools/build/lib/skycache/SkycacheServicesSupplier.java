@@ -117,6 +117,9 @@ final class SkycacheServicesSupplier implements RemoteAnalysisCachingServicesSup
   /** Set by the module for each command versioned at a mainline commit. */
   @Nullable private GitVersions.Base base;
 
+  /** How the working tree differs from {@link #base}. */
+  private ListenableFuture<ImmutableSet<String>> changes = immediateFuture(ImmutableSet.of());
+
   @Nullable private SnapshotIndexClient snapshotIndex;
   @Nullable private SkycacheMetadata metadata;
 
@@ -148,9 +151,14 @@ final class SkycacheServicesSupplier implements RemoteAnalysisCachingServicesSup
    * base}, or, if null, neither.
    *
    * <p>Separate from {@link #configure} for the same reason as {@link #setCredentials}.
+   *
+   * @param changes how the working tree differs from {@code base}: an upload is recorded only if
+   *     it does not
    */
-  void setBase(@Nullable GitVersions.Base base) {
+  void setBase(
+      @Nullable GitVersions.Base base, ListenableFuture<ImmutableSet<String>> changes) {
     this.base = base;
+    this.changes = changes;
   }
 
   @Override
@@ -245,7 +253,8 @@ final class SkycacheServicesSupplier implements RemoteAnalysisCachingServicesSup
         snapshotStub = snapshotStub.withCallCredentials(callCredentials);
       }
       snapshotIndex =
-          new SnapshotIndexClient(snapshotStub, base, grpcStore::getStats, Clock.systemUTC());
+          new SnapshotIndexClient(
+              snapshotStub, base, changes, grpcStore::getStats, Clock.systemUTC());
       metadata = new SkycacheMetadata();
     }
     installValidatingClient();
@@ -386,6 +395,7 @@ final class SkycacheServicesSupplier implements RemoteAnalysisCachingServicesSup
     client = null;
     validation = null;
     base = null;
+    changes = immediateFuture(ImmutableSet.of());
     snapshotIndex = null;
     metadata = null;
     store = null;

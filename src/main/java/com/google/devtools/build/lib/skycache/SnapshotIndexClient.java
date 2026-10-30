@@ -21,6 +21,8 @@ import com.canva.skycache.v1.RecordSnapshotRequest;
 import com.canva.skycache.v1.Snapshot;
 import com.canva.skycache.v1.SnapshotIndexGrpc.SnapshotIndexFutureStub;
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.collect.ImmutableSet;
+import com.google.common.util.concurrent.ListenableFuture;
 import com.google.devtools.build.lib.skyframe.serialization.FingerprintValueStore;
 import com.google.devtools.build.lib.skyframe.serialization.SkycacheMetadataParams;
 import com.google.devtools.build.lib.skyframe.serialization.analysis.LookupTopLevelTargetsResult;
@@ -56,20 +58,24 @@ final class SnapshotIndexClient
 
   private final SnapshotIndexFutureStub stub;
   private final GitVersions.Base base;
+  private final ListenableFuture<ImmutableSet<String>> changes;
   private final Supplier<FingerprintValueStore.Stats> uploadStats;
   private final Clock clock;
 
   /**
    * @param base the mainline commit this command is versioned at
+   * @param changes how the working tree differs from {@code base}
    * @param uploadStats what the command's store has sent, for the snapshot's statistics
    */
   SnapshotIndexClient(
       SnapshotIndexFutureStub stub,
       GitVersions.Base base,
+      ListenableFuture<ImmutableSet<String>> changes,
       Supplier<FingerprintValueStore.Stats> uploadStats,
       Clock clock) {
     this.stub = stub;
     this.base = base;
+    this.changes = changes;
     this.uploadStats = uploadStats;
     this.clock = clock;
   }
@@ -91,6 +97,24 @@ final class SnapshotIndexClient
           String.format(
               "upload was versioned at %d but the workspace is at commit %d (%s)",
               evaluatingVersion, base.ordinal(), base.commit()));
+    }
+    ImmutableSet<String> changed;
+    try {
+      // Done by now: the upload needed the same changes to version what it wrote.
+      changed = changes.get();
+    } catch (ExecutionException e) {
+      throw new IOException("reading the working tree's changes: " + e.getCause().getMessage(), e);
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      throw new IOException("interrupted reading the working tree's changes", e);
+    }
+    if (!changed.isEmpty()) {
+      // The upload left out what the changes reach, so it is not the commit's analysis.
+      throw new IOException(
+          String.format(
+              "not recording a snapshot of %s: the working tree differs from it in %d paths,"
+                  + " starting with %s",
+              base.commit(), changed.size(), changed.iterator().next()));
     }
     FingerprintValueStore.Stats stats = uploadStats.get();
     Snapshot snapshot =

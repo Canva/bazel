@@ -183,6 +183,7 @@ final class SelectedEntrySerializer {
   static final class SerializationStats {
     private final AtomicLong analysisNodes = new AtomicLong(0);
     private final AtomicLong executionNodes = new AtomicLong(0);
+    private final AtomicLong unversionedNodes = new AtomicLong(0);
 
     SerializationStats() {}
 
@@ -200,6 +201,11 @@ final class SelectedEntrySerializer {
 
     long executionNodes() {
       return executionNodes.get();
+    }
+
+    /** Entries left out because they depend on a source newer than the version they are keyed at. */
+    long unversionedNodes() {
+      return unversionedNodes.get();
     }
   }
 
@@ -665,6 +671,18 @@ final class SelectedEntrySerializer {
                 String.format(
                     "Expected NodeInvalidationDataInfo for %s, but got %s",
                     key, dataInfo == null ? "null" : dataInfo.getClass().getSimpleName()));
+          }
+
+          if (node.mtsv() > FileDependencySerializer.maxDependencyVersion()) {
+            // The key claims the entry is what the evaluating version produces, but something it
+            // read is newer: an uncommitted edit, say. A reader at that version without the edit
+            // would find nothing in its own changes to invalidate the entry, so it is left out.
+            serializationStats.unversionedNodes.incrementAndGet();
+            // Its invalidation data was still written, and a failure there is still a failure.
+            writeStatuses.addWriteStatus(node.writeStatus());
+            writeStatuses.counters.entriesWaitingForInvalidationBytes.decrementAndGet();
+            writeStatuses.selectedEntryDone();
+            return;
           }
 
           codedOut.writeEnumNoTag(

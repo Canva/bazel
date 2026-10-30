@@ -219,10 +219,16 @@ public final class FrontierSerializer {
       reporter.handle(
           Event.info(
               String.format(
-                  "Skycache sync write: serialized %s/%s analysis/execution nodes in %s",
+                  "Skycache sync write: serialized %s/%s analysis/execution nodes in %s%s",
                   serializationStats.analysisNodes(),
                   serializationStats.executionNodes(),
-                  stopwatch)));
+                  stopwatch,
+                  serializationStats.unversionedNodes() == 0
+                      ? ""
+                      : String.format(
+                          "; left out %s that depend on changes newer than the version they would"
+                              + " be keyed at",
+                          serializationStats.unversionedNodes()))));
     } catch (ExecutionException e) {
       // The writeStatus future is not known to throw any ExecutionExceptions.
       Throwable cause = e.getCause();

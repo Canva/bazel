@@ -16,9 +16,11 @@ package com.google.devtools.build.lib.skycache;
 import com.google.auth.Credentials;
 import static com.google.common.util.concurrent.Futures.immediateFailedFuture;
 import static com.google.common.util.concurrent.Futures.immediateFuture;
+import static com.google.common.util.concurrent.MoreExecutors.directExecutor;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
+import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.ListeningExecutorService;
 import com.google.common.util.concurrent.MoreExecutors;
@@ -162,7 +164,8 @@ public final class SkycacheModule extends SerializationModule {
     env.setVersionGetter(UnchangedLongVersionGetter.INSTANCE);
     workspaceInfo = null;
     supplier.setValidation(null);
-    supplier.setBase(null);
+    supplier.setBase(null, immediateFuture(ImmutableSet.of()));
+    FileDependencySerializer.setMaxDependencyVersion(FileDependencySerializer.UNBOUNDED);
 
     // An open-source output base is built from absolute symlinks, which the frontier serializer
     // rejects outright. Tolerating them is only correct alongside this cache, so it follows the
@@ -225,10 +228,11 @@ public final class SkycacheModule extends SerializationModule {
   /**
    * Versions the command by the mainline commit it is based on.
    *
-   * <p>A command that writes has to be a clean checkout of that commit, since every key it writes
-   * claims the commit's content. A command that reads checks each entry against what differs
-   * between its base and its own working tree; if the workspace cannot be versioned at all, every
-   * entry is a miss.
+   * <p>Every key a command writes claims that commit's content, so a command that writes leaves out
+   * whatever its own changes against the commit reach: their versions are past it, and the
+   * serializer drops entries depending on a version past the one they are keyed at. A command that
+   * reads checks each entry against the same changes. If the workspace cannot be versioned at all,
+   * a write fails and every read is a miss.
    */
   private void versionFromGit(
       CommandEnvironment env, RemoteAnalysisCacheMode mode, SkycacheGitOptions gitOptions)
@@ -243,19 +247,13 @@ public final class SkycacheModule extends SerializationModule {
     GitVersions.Base base;
     try {
       GitVersions.checkWorkTreeIsRoot(git);
-      // A writer's base is HEAD, which is on the mainline exactly when it is its own merge base.
-      base =
-          GitVersions.resolveBase(
-              git, gitOptions.getMainline(), writes ? "" : gitOptions.getBase());
-      if (writes) {
-        GitVersions.checkClean(git, base);
-      }
+      base = GitVersions.resolveBase(git, gitOptions.getMainline(), gitOptions.getBase());
     } catch (IOException e) {
       if (writes) {
         throw abruptExit(
             String.format(
-                "remote analysis cache uploads need a clean checkout of a commit on the"
-                    + " first-parent history of %s: %s",
+                "remote analysis cache uploads need a commit on the first-parent history of %s"
+                    + " to version them: %s",
                 gitOptions.getMainline(), e.getMessage()));
       }
       env.getReporter()
@@ -275,13 +273,16 @@ public final class SkycacheModule extends SerializationModule {
     }
 
     workspaceInfo = new GitWorkspaceInfo(base.ordinal());
-    supplier.setBase(base);
     env.getReporter()
         .handle(
             Event.info(
                 String.format(
                     "Analysis cache: versioned at %s, commit %d of %s",
                     base.commit(), base.ordinal(), gitOptions.getMainline())));
+    // Off the command thread: analysis needs neither, and on the monorepo each takes seconds.
+    ListenableFuture<ImmutableSet<String>> changes =
+        gitExecutor.submit(() -> GitVersions.changedPaths(git, base));
+    pendingGit.add(changes);
     if (writes) {
       java.nio.file.Path cacheDir =
           java.nio.file.Path.of(
@@ -289,18 +290,28 @@ public final class SkycacheModule extends SerializationModule {
       ListenableFuture<History> history =
           gitExecutor.submit(() -> GitVersions.history(git, base, HISTORY_WINDOW, cacheDir));
       pendingGit.add(history);
-      env.setVersionGetter(new GitLongVersionGetter(env.getWorkspace(), history));
+      ListenableFuture<GitLongVersionGetter.Uncommitted> uncommitted =
+          Futures.transformAsync(
+              changes,
+              paths ->
+                  gitExecutor.submit(
+                      () ->
+                          new GitLongVersionGetter.Uncommitted(
+                              paths, GitVersions.changedListings(git, base, paths))),
+              directExecutor());
+      pendingGit.add(uncommitted);
+      env.setVersionGetter(new GitLongVersionGetter(env.getWorkspace(), history, uncommitted));
+      FileDependencySerializer.setMaxDependencyVersion(base.ordinal());
     }
     if (reads) {
-      // A writer is clean at its base, so it has nothing to diff.
-      ListenableFuture<ImmutableSet<String>> changes =
-          writes
-              ? immediateFuture(ImmutableSet.of())
-              : gitExecutor.submit(() -> GitVersions.changedPaths(git, base));
-      pendingGit.add(changes);
       supplier.setValidation(
           new SkycacheServicesSupplier.Validation(
               base.ordinal(), changes, compressionService, fingerprinter));
+    }
+    // A build that both reads and writes is a developer's, between commits: neither asking which
+    // commits were uploaded nor claiming its own was is meaningful.
+    if (!(reads && writes)) {
+      supplier.setBase(base, changes);
     }
   }
 

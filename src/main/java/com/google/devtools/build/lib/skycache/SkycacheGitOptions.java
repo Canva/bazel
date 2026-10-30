@@ -41,7 +41,8 @@ public abstract class SkycacheGitOptions extends OptionsBase {
       effectTags = {OptionEffectTag.BAZEL_INTERNAL_CONFIGURATION},
       help =
           "The branch whose first-parent history numbers versions for the remote analysis cache."
-              + " Uploads must be from a clean checkout of a commit on it.")
+              + " Every entry is keyed at a commit on it; an upload from a working tree that"
+              + " differs from that commit leaves out the entries the differences reach.")
   public abstract String getMainline();
 
   @Option(
@@ -50,8 +51,9 @@ public abstract class SkycacheGitOptions extends OptionsBase {
       documentationCategory = OptionDocumentationCategory.UNDOCUMENTED,
       effectTags = {OptionEffectTag.BAZEL_INTERNAL_CONFIGURATION},
       help =
-          "The mainline commit whose upload a download reads, checking every entry against what"
-              + " differs between that commit and the working tree. Defaults to the merge base of"
-              + " HEAD and --canva_skycache_mainline. An upload is always of HEAD.")
+          "The mainline commit the analysis cache is keyed at: a download reads its upload,"
+              + " checking every entry against what differs between that commit and the working"
+              + " tree, and an upload writes it, leaving out whatever those differences reach."
+              + " Defaults to the merge base of HEAD and --canva_skycache_mainline.")
   public abstract String getBase();
 }

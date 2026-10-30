@@ -143,8 +143,16 @@ sealed interface InvalidationDataInfoOrFuture
    */
   static final class ListingInvalidationDataInfo extends BaseInvalidationDataInfo<String>
       implements ListingDataInfo {
-    ListingInvalidationDataInfo(String cacheKey, WriteStatus writeStatus) {
+    private final long mtsv;
+
+    ListingInvalidationDataInfo(String cacheKey, WriteStatus writeStatus, long mtsv) {
       super(cacheKey, writeStatus);
+      this.mtsv = mtsv;
+    }
+
+    /** The MTSV of the listing and of the directory's own file entry. */
+    long mtsv() {
+      return mtsv;
     }
   }
 
@@ -170,8 +178,20 @@ sealed interface InvalidationDataInfoOrFuture
   /** Information about remotely persisted {@link AbstractNestedFileOpNodes}. */
   static final class NodeInvalidationDataInfo extends BaseInvalidationDataInfo<PackedFingerprint>
       implements NodeDataInfo {
-    NodeInvalidationDataInfo(PackedFingerprint key, WriteStatus writeStatus) {
+    private final long mtsv;
+
+    NodeInvalidationDataInfo(PackedFingerprint key, WriteStatus writeStatus, long mtsv) {
       super(key, writeStatus);
+      this.mtsv = mtsv;
+    }
+
+    /**
+     * The greatest MTSV of anything the node transitively depends on, source files included.
+     *
+     * <p>Not part of the node's stored data or key: it is for the writer to decide what to upload.
+     */
+    long mtsv() {
+      return mtsv;
     }
   }
 

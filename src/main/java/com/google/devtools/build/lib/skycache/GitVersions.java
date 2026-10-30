@@ -19,6 +19,7 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import java.io.IOException;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
@@ -113,25 +114,6 @@ final class GitVersions {
   }
 
   /**
-   * Fails unless the working tree holds exactly the base: {@code HEAD} is the base and nothing is
-   * modified, staged, or untracked outside {@code .gitignore}.
-   */
-  static void checkClean(Git git, Base base) throws IOException, InterruptedException {
-    String head = resolveCommit(git, "HEAD");
-    if (!head.equals(base.commit())) {
-      throw new IOException(
-          String.format("HEAD is %s, not the mainline commit %s", head, base.commit()));
-    }
-    Set<String> dirty = statusPaths(git);
-    if (!dirty.isEmpty()) {
-      throw new IOException(
-          String.format(
-              "the working tree has %d local changes, starting with %s",
-              dirty.size(), dirty.iterator().next()));
-    }
-  }
-
-  /**
    * Returns every workspace-relative path whose file or directory differs between the base and the
    * working tree.
    *
@@ -175,6 +157,76 @@ final class GitVersions {
       }
     }
     return changed.build();
+  }
+
+  /** How many paths one {@code git ls-tree} is handed, to stay well inside the argument limit. */
+  private static final int LS_TREE_BATCH = 500;
+
+  private enum EntryType {
+    ABSENT,
+    FILE,
+    DIRECTORY,
+    SYMLINK
+  }
+
+  /**
+   * Returns every directory whose listing differs between the base and the working tree.
+   *
+   * <p>A listing holds names and entry types, not contents, so only {@code changedPaths} that were
+   * added, deleted or changed type reach their parent's listing; an edit in place does not. That
+   * matters to a writer, which leaves out every entry reaching a changed listing: an edited BUILD
+   * file must not cost every glob in its package.
+   *
+   * @param changedPaths as {@link #changedPaths} returns them
+   */
+  static ImmutableSet<String> changedListings(Git git, Base base, Set<String> changedPaths)
+      throws IOException, InterruptedException {
+    Map<String, EntryType> inBase = new HashMap<>();
+    List<String> paths = new ArrayList<>(changedPaths);
+    for (int start = 0; start < paths.size(); start += LS_TREE_BATCH) {
+      var args = new ArrayList<String>();
+      // Global, so it precedes the subcommand: paths are names here, not patterns.
+      args.add("--literal-pathspecs");
+      args.add("ls-tree");
+      args.add("-z");
+      args.add("--full-tree");
+      args.add(base.commit());
+      args.add("--");
+      args.addAll(paths.subList(start, Math.min(paths.size(), start + LS_TREE_BATCH)));
+      // "<mode> SP <type> SP <object> TAB <path>"
+      for (String record : split(git.run(args.toArray(String[]::new)))) {
+        int tab = record.indexOf('\t');
+        if (tab < 0) {
+          throw new IOException("malformed git ls-tree record: " + record);
+        }
+        String mode = record.substring(0, record.indexOf(' '));
+        inBase.put(
+            record.substring(tab + 1),
+            switch (mode) {
+              case "120000" -> EntryType.SYMLINK;
+              case "040000", "160000" -> EntryType.DIRECTORY; // A submodule is a directory here.
+              default -> EntryType.FILE;
+            });
+      }
+    }
+    var listings = ImmutableSet.<String>builder();
+    for (String path : changedPaths) {
+      if (inBase.getOrDefault(path, EntryType.ABSENT) != inWorkTree(git, path)) {
+        listings.add(parent(path));
+      }
+    }
+    return listings.build();
+  }
+
+  private static EntryType inWorkTree(Git git, String path) {
+    java.nio.file.Path resolved = git.workTree().resolve(path);
+    if (Files.isSymbolicLink(resolved)) {
+      return EntryType.SYMLINK;
+    }
+    if (Files.isDirectory(resolved, LinkOption.NOFOLLOW_LINKS)) {
+      return EntryType.DIRECTORY;
+    }
+    return Files.exists(resolved, LinkOption.NOFOLLOW_LINKS) ? EntryType.FILE : EntryType.ABSENT;
   }
 
   /** Returns which of {@code dirs} are directories in {@code commit}. */
