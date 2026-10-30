@@ -27,6 +27,7 @@ FILES = [
     "execution_graph_writer",
     "file_invalidation_data",
     "analysis_cache",
+    "snapshot_index",
 ]
 
 [proto_library(
@@ -202,6 +203,12 @@ java_grpc_library(
     name = "analysis_cache_java_grpc",
     srcs = [":analysis_cache_proto"],
     deps = [":analysis_cache_java_proto"],
+)
+
+java_grpc_library(
+    name = "snapshot_index_java_grpc",
+    srcs = [":snapshot_index_proto"],
+    deps = [":snapshot_index_java_proto"],
 )
 
 java_grpc_library(

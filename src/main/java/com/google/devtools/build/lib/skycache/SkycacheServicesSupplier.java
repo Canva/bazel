@@ -19,6 +19,8 @@ import static java.util.stream.Collectors.joining;
 
 import build.aspect.skycache.v1.AnalysisCacheGrpc;
 import build.aspect.skycache.v1.AnalysisCacheGrpc.AnalysisCacheFutureStub;
+import com.canva.skycache.v1.SnapshotIndexGrpc;
+import com.canva.skycache.v1.SnapshotIndexGrpc.SnapshotIndexFutureStub;
 import com.google.auth.Credentials;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.util.concurrent.ListenableFuture;
@@ -31,18 +33,21 @@ import com.google.devtools.build.lib.server.FailureDetails.RemoteAnalysisCaching
 import com.google.devtools.build.lib.compress.CompressionService;
 import com.google.devtools.build.lib.skyframe.serialization.FingerprintValueStore;
 import com.google.devtools.build.lib.skyframe.serialization.Fingerprinter;
+import com.google.devtools.build.lib.skyframe.serialization.SkycacheMetadataParams;
 import com.google.devtools.build.lib.skyframe.serialization.analysis.ClientId;
 import com.google.devtools.build.lib.skyframe.serialization.analysis.RemoteAnalysisCacheMode;
 import com.google.devtools.build.lib.skyframe.serialization.analysis.RemoteAnalysisCacheClient;
 import com.google.devtools.build.lib.skyframe.serialization.analysis.RemoteAnalysisCachingOptions;
 import com.google.devtools.build.lib.skyframe.serialization.analysis.RemoteAnalysisCachingServicesOptions;
 import com.google.devtools.build.lib.skyframe.serialization.analysis.RemoteAnalysisCachingServicesSupplier;
+import com.google.devtools.build.lib.skyframe.serialization.analysis.RemoteAnalysisMetadataWriter;
 import com.google.devtools.build.lib.skyframe.serialization.analysis.ValidatingAnalysisCacheClient;
 import com.google.devtools.build.lib.util.SerializedAbruptExitException;
 import com.google.devtools.common.options.OptionsProvider;
 import io.grpc.CallCredentials;
 import io.grpc.ManagedChannel;
 import java.io.IOException;
+import java.time.Clock;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import javax.annotation.Nullable;
@@ -109,6 +114,12 @@ final class SkycacheServicesSupplier implements RemoteAnalysisCachingServicesSup
   /** Set by the module for each command that versions the workspace. */
   @Nullable private Validation validation;
 
+  /** Set by the module for each command versioned at a mainline commit. */
+  @Nullable private GitVersions.Base base;
+
+  @Nullable private SnapshotIndexClient snapshotIndex;
+  @Nullable private SkycacheMetadata metadata;
+
   @Nullable private ValidatingAnalysisCacheClient validatingClient;
   @Nullable private String validationSummaryAtShutdown;
 
@@ -130,6 +141,16 @@ final class SkycacheServicesSupplier implements RemoteAnalysisCachingServicesSup
    */
   void setValidation(@Nullable Validation validation) {
     this.validation = validation;
+  }
+
+  /**
+   * Has uploads recorded in, and downloads checked against, the service's snapshot index at {@code
+   * base}, or, if null, neither.
+   *
+   * <p>Separate from {@link #configure} for the same reason as {@link #setCredentials}.
+   */
+  void setBase(@Nullable GitVersions.Base base) {
+    this.base = base;
   }
 
   @Override
@@ -216,6 +237,17 @@ final class SkycacheServicesSupplier implements RemoteAnalysisCachingServicesSup
                 scheduler));
     store = grpcStore;
     client = new GrpcAnalysisCacheClient(gets);
+    if (base != null && servicesOptions.getAnalysisCacheEnableMetadataQueries()) {
+      // Only a git-versioned command has a commit to record or look up, and only the service
+      // has an index: an in-memory store's uploads are gone when the server exits.
+      SnapshotIndexFutureStub snapshotStub = SnapshotIndexGrpc.newFutureStub(channel);
+      if (callCredentials != null) {
+        snapshotStub = snapshotStub.withCallCredentials(callCredentials);
+      }
+      snapshotIndex =
+          new SnapshotIndexClient(snapshotStub, base, grpcStore::getStats, Clock.systemUTC());
+      metadata = new SkycacheMetadata();
+    }
     installValidatingClient();
   }
 
@@ -236,6 +268,7 @@ final class SkycacheServicesSupplier implements RemoteAnalysisCachingServicesSup
                 validation.fingerprinter()),
             validation.validityHorizon(),
             validation.clientChanges());
+    validatingClient.setTopLevelTargetsLookup(snapshotIndex);
     client = validatingClient;
   }
 
@@ -314,6 +347,18 @@ final class SkycacheServicesSupplier implements RemoteAnalysisCachingServicesSup
   }
 
   @Override
+  @Nullable
+  public ListenableFuture<RemoteAnalysisMetadataWriter> getMetadataWriter() {
+    return snapshotIndex == null ? null : immediateFuture(snapshotIndex);
+  }
+
+  @Override
+  @Nullable
+  public SkycacheMetadataParams getSkycacheMetadataParams() {
+    return metadata;
+  }
+
+  @Override
   public SafeExecutor getCommandExecutor() {
     return COMMAND_EXECUTOR;
   }
@@ -340,6 +385,9 @@ final class SkycacheServicesSupplier implements RemoteAnalysisCachingServicesSup
     }
     client = null;
     validation = null;
+    base = null;
+    snapshotIndex = null;
+    metadata = null;
     store = null;
     grpcStore = null;
     gets = null;

@@ -55,6 +55,7 @@ import com.google.devtools.build.lib.skyframe.serialization.analysis.Invalidatio
 import com.google.devtools.build.lib.skyframe.serialization.analysis.InvalidationDataInfoOrFuture.NodeInvalidationDataInfo;
 import com.google.devtools.build.lib.skyframe.serialization.analysis.ValidatingAnalysisCacheClient.DepotChange;
 import com.google.devtools.build.lib.skyframe.serialization.analysis.ValidatingAnalysisCacheClient.ValidationStats;
+import com.google.devtools.build.lib.skyframe.serialization.analysis.proto.TopLevelTargetsMatchStatus;
 import com.google.devtools.build.lib.skyframe.serialization.proto.DataType;
 import com.google.devtools.build.lib.versioning.LongVersionGetter;
 import com.google.devtools.build.lib.vfs.DigestHashFunction;
@@ -162,6 +163,35 @@ public final class ValidatingAnalysisCacheClientTest {
 
     assertThat(lookup(client, entry)).isEmpty();
     assertThat(client.getValidationStats()).isEqualTo(new ValidationStats(0, 0, 1));
+  }
+
+  @Test
+  public void topLevelTargets_withoutALookup_match() throws Exception {
+    var client = ValidatingAnalysisCacheClient.create(
+            storage, WRITER_VERSION, ImmutableList.of(), ImmutableList.of());
+
+    var result = client.lookupTopLevelTargets(WRITER_VERSION, "config", true, "bazel");
+
+    assertThat(result.status())
+        .isEqualTo(TopLevelTargetsMatchStatus.MATCH_STATUS_MATCH.getNumber());
+    assertThat(client.getStats().matchStatus()).isEqualTo(result.status());
+  }
+
+  @Test
+  public void topLevelTargets_reportTheLookupsAnswer() throws Exception {
+    var client = ValidatingAnalysisCacheClient.create(
+            storage, WRITER_VERSION, ImmutableList.of(), ImmutableList.of());
+    client.setTopLevelTargetsLookup(
+        (version, config, fakeStamp, bazelVersion) ->
+            new LookupTopLevelTargetsResultImpl(
+                TopLevelTargetsMatchStatus.MATCH_STATUS_DIFFERENT_CL.getNumber(),
+                version + " " + config));
+
+    var result = client.lookupTopLevelTargets(WRITER_VERSION, "config", true, "bazel");
+
+    assertThat(result.statusMessage()).isEqualTo(WRITER_VERSION + " config");
+    assertThat(client.getStats().matchStatus())
+        .isEqualTo(TopLevelTargetsMatchStatus.MATCH_STATUS_DIFFERENT_CL.getNumber());
   }
 
   @Test

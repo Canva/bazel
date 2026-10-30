@@ -46,13 +46,39 @@ java_test(
 java_binary(
     name = "DevAnalysisCacheServer",
     testonly = True,
-    srcs = ["DevAnalysisCacheServer.java"],
+    srcs = [
+        "DevAnalysisCacheServer.java",
+        "DevSnapshotIndex.java",
+    ],
     main_class = "com.google.devtools.build.lib.skycache.DevAnalysisCacheServer",
     deps = [
         "//src/main/protobuf:analysis_cache_java_grpc",
         "//src/main/protobuf:analysis_cache_java_proto",
+        "//src/main/protobuf:snapshot_index_java_grpc",
+        "//src/main/protobuf:snapshot_index_java_proto",
         "//third_party:netty",
         "//third_party/grpc-java:grpc-jar",
         "@com_google_protobuf//:protobuf_java",
+    ],
+)
+
+java_test(
+    name = "SnapshotIndexClientTest",
+    srcs = [
+        "DevSnapshotIndex.java",
+        "SnapshotIndexClientTest.java",
+    ],
+    deps = [
+        "//src/main/java/com/google/devtools/build/lib/skycache",
+        "//src/main/java/com/google/devtools/build/lib/skyframe/serialization:fingerprint_value_store",
+        "//src/main/java/com/google/devtools/build/lib/skyframe/serialization/analysis:lookup_result",
+        "//src/main/java/com/google/devtools/build/lib/skyframe/serialization/analysis/proto:analysis_cache_service_metadata_status_java_proto",
+        "//src/main/java/com/google/devtools/build/lib/util:bucket",
+        "//src/main/protobuf:snapshot_index_java_grpc",
+        "//src/main/protobuf:snapshot_index_java_proto",
+        "//third_party:guava",
+        "//third_party:junit4",
+        "//third_party:truth",
+        "//third_party/grpc-java:grpc-jar",
     ],
 )

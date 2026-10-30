@@ -55,6 +55,8 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
@@ -121,6 +123,22 @@ public final class ValidatingAnalysisCacheClient implements RemoteAnalysisCacheC
       CompressionService compressionService,
       Fingerprinter fingerprinter) {}
 
+  /**
+   * Answers {@link #lookupTopLevelTargets} from wherever the writer recorded what it uploaded.
+   *
+   * <p>Entries are checked one by one either way. This only decides, ahead of the build, whether
+   * there is anything at this client's version worth checking.
+   */
+  @FunctionalInterface
+  public interface TopLevelTargetsLookup {
+    LookupTopLevelTargetsResult lookup(
+        long evaluatingVersion,
+        String configurationHash,
+        boolean useFakeStampData,
+        String bazelVersion)
+        throws ExecutionException, TimeoutException, InterruptedException;
+  }
+
   private final FingerprintValueStore store;
   private final FileDependencyDeserializer deserializer;
 
@@ -140,6 +158,7 @@ public final class ValidatingAnalysisCacheClient implements RemoteAnalysisCacheC
   private final ConcurrentHashMap<String, LongAdder> invalidationReasons =
       new ConcurrentHashMap<>();
   private final AtomicReference<String> firstMissingData = new AtomicReference<>();
+  @Nullable private volatile TopLevelTargetsLookup topLevelTargetsLookup;
 
   /**
    * Creates a client for one command.
@@ -499,18 +518,31 @@ public final class ValidatingAnalysisCacheClient implements RemoteAnalysisCacheC
     };
   }
 
+  /**
+   * Has {@link #lookupTopLevelTargets} ask {@code lookup}. Call before handing the client out.
+   *
+   * <p>Without one, every query is a match: the entries themselves say whether they are valid.
+   */
+  public void setTopLevelTargetsLookup(@Nullable TopLevelTargetsLookup lookup) {
+    this.topLevelTargetsLookup = lookup;
+  }
+
   @Override
   public LookupTopLevelTargetsResult lookupTopLevelTargets(
       long evaluatingVersion,
       String configurationHash,
       boolean useFakeStampData,
-      String bazelVersion) {
-    // Whether a download is worth starting is decided before this client exists, by whoever chose
-    // the validity horizon.
-    matchStatus.set(TopLevelTargetsMatchStatus.MATCH_STATUS_MATCH.getNumber());
-    return new LookupTopLevelTargetsResultImpl(
-        TopLevelTargetsMatchStatus.MATCH_STATUS_MATCH.getNumber(),
-        "entries are checked against the workspace's changes as they are read");
+      String bazelVersion)
+      throws ExecutionException, TimeoutException, InterruptedException {
+    TopLevelTargetsLookup lookup = topLevelTargetsLookup;
+    LookupTopLevelTargetsResult result =
+        lookup == null
+            ? new LookupTopLevelTargetsResultImpl(
+                TopLevelTargetsMatchStatus.MATCH_STATUS_MATCH.getNumber(),
+                "entries are checked against the workspace's changes as they are read")
+            : lookup.lookup(evaluatingVersion, configurationHash, useFakeStampData, bazelVersion);
+    matchStatus.set(result.status());
+    return result;
   }
 
   @Override

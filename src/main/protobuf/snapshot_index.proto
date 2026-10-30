@@ -1,0 +1,58 @@
+syntax = "proto3";
+
+// Canva-specific companion to analysis_cache.proto: the metadata table from the Skycache design
+// (SKYCACHE_DESIGN.md §8.2, §8.3). The priming pipeline records which (Bazel install, top-level
+// configuration, master commit) combinations it has uploaded; readers ask for the newest primed
+// snapshot at or before their own merge-base so they can compute VersionedChanges from a single
+// `git diff`. A reader whose configuration was never primed learns that in one RPC and skips every
+// further lookup.
+package skycache.v1;
+
+option java_package = "com.canva.skycache.v1";
+option java_multiple_files = true;
+
+service SnapshotIndex {
+  // Records a completed upload. Writer-only: the priming pipeline identity.
+  rpc Record(RecordSnapshotRequest) returns (RecordSnapshotResponse);
+
+  // Returns the newest snapshot for the install and configuration whose master ordinal is at or
+  // before `max_master_ordinal`, or no snapshot if none has been primed.
+  rpc Lookup(LookupSnapshotRequest) returns (LookupSnapshotResponse);
+}
+
+message Snapshot {
+  // MD5 of the Bazel install base that produced the upload. Part of every cache key.
+  string bazel_install_md5 = 1;
+  // Top-level BuildOptions checksum of the upload. Part of every cache key.
+  string configuration_hash = 2;
+  // First-parent commit count of the primed master commit (the design's masterOrdinal).
+  int64 master_ordinal = 3;
+  // Git commit the upload was produced from.
+  string commit = 4;
+  // `bazel version` build label of the writer, for diagnostics only.
+  string bazel_version = 5;
+  // Top-level targets the priming build analysed.
+  repeated string targets = 6;
+  // When the writer finished the upload.
+  int64 recorded_unix_millis = 7;
+  // Upload statistics for dashboards and capacity planning.
+  int64 entries = 8;
+  int64 bytes = 9;
+}
+
+message RecordSnapshotRequest {
+  Snapshot snapshot = 1;
+}
+
+message RecordSnapshotResponse {}
+
+message LookupSnapshotRequest {
+  string bazel_install_md5 = 1;
+  string configuration_hash = 2;
+  int64 max_master_ordinal = 3;
+}
+
+message LookupSnapshotResponse {
+  // Unset when nothing matching has been primed.
+  Snapshot snapshot = 1;
+}

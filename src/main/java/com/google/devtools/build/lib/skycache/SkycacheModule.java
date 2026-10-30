@@ -162,6 +162,7 @@ public final class SkycacheModule extends SerializationModule {
     env.setVersionGetter(UnchangedLongVersionGetter.INSTANCE);
     workspaceInfo = null;
     supplier.setValidation(null);
+    supplier.setBase(null);
 
     // An open-source output base is built from absolute symlinks, which the frontier serializer
     // rejects outright. Tolerating them is only correct alongside this cache, so it follows the
@@ -274,6 +275,7 @@ public final class SkycacheModule extends SerializationModule {
     }
 
     workspaceInfo = new GitWorkspaceInfo(base.ordinal());
+    supplier.setBase(base);
     env.getReporter()
         .handle(
             Event.info(

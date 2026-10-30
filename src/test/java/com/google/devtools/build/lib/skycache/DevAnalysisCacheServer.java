@@ -30,8 +30,9 @@ import java.util.concurrent.atomic.AtomicLong;
  * An in-memory analysis cache service for trying a patched Bazel by hand.
  *
  * <p>Speaks the same protocol as the real service, with no authentication and no persistence:
- * entries last as long as the process. Writes are first-wins, as the real service's are. Prints
- * its counters each time they change, at most once a second.
+ * entries last as long as the process. Writes are first-wins, as the real service's are. Also
+ * serves the snapshot index uploads are recorded in. Prints its counters each time they change, at
+ * most once a second.
  *
  * <p>Usage: {@code DevAnalysisCacheServer <port>}, then point Bazel at {@code
  * --experimental_remote_analysis_cache=grpc://localhost:<port>}.
@@ -42,6 +43,7 @@ public final class DevAnalysisCacheServer extends AnalysisCacheGrpc.AnalysisCach
   private final AtomicLong keysRequested = new AtomicLong();
   private final AtomicLong keysHit = new AtomicLong();
   private final AtomicLong entriesOffered = new AtomicLong();
+  private final DevSnapshotIndex snapshots = new DevSnapshotIndex();
 
   @Override
   public void get(GetRequest request, StreamObserver<GetResponse> responseObserver) {
@@ -73,8 +75,12 @@ public final class DevAnalysisCacheServer extends AnalysisCacheGrpc.AnalysisCach
 
   private String counters() {
     return String.format(
-        "entries=%d offered=%d requested=%d hit=%d",
-        entries.size(), entriesOffered.get(), keysRequested.get(), keysHit.get());
+        "entries=%d offered=%d requested=%d hit=%d snapshots=%d",
+        entries.size(),
+        entriesOffered.get(),
+        keysRequested.get(),
+        keysHit.get(),
+        snapshots.size());
   }
 
   public static void main(String[] args) throws Exception {
@@ -83,6 +89,7 @@ public final class DevAnalysisCacheServer extends AnalysisCacheGrpc.AnalysisCach
     Server server =
         NettyServerBuilder.forPort(port)
             .addService(service)
+            .addService(service.snapshots)
             .maxInboundMessageSize(256 * 1024 * 1024)
             .build()
             .start();
