@@ -631,7 +631,30 @@ public final class StarlarkProvider extends StarlarkType
    */
   Depset rewrapDepset(int index, NestedSet<?> nestedSet) {
     Class<?> type = nestedSet.isEmpty() ? Object.class : depsetTypePredictor.get(index);
+    if (type == null) {
+      // The instance was deserialized from the remote analysis cache: its field kept the unwrapped
+      // set, but the prediction belonged to the provider object of the server that wrote it, and
+      // this server's has never seen an instance. Every element of a non-empty depset has the
+      // same type, so any one of them recovers it.
+      @SuppressWarnings("unchecked")
+      Depset depset =
+          Depset.of((Class<Object>) anyElement(nestedSet).getClass(), (NestedSet<Object>) nestedSet);
+      depsetTypePredictor.compareAndSet(index, null, depset.getElementClass());
+      return depset;
+    }
     return Depset.rewrap(type, nestedSet);
+  }
+
+  /** Returns some element of a non-empty set, descending only as deep as the first one. */
+  private static Object anyElement(NestedSet<?> set) {
+    while (!set.isSingleton()) {
+      var leaves = set.getLeaves();
+      if (!leaves.isEmpty()) {
+        return leaves.get(0);
+      }
+      set = set.getNonLeaves().get(0);
+    }
+    return set.getSingleton();
   }
 
   Object getKeyOrIdentityToken() {

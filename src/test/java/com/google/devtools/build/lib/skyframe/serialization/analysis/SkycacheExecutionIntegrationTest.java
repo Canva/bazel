@@ -371,6 +371,46 @@ public final class SkycacheExecutionIntegrationTest extends BuildIntegrationTest
   }
 
   @Test
+  public void schemafulProviderDepset_readByAReanalyzedConsumer() throws Exception {
+    write(
+        "prov/defs.bzl",
+        """
+        Info = provider(fields = ["files"])
+
+        def _leaf_impl(ctx):
+            return [Info(files = depset(ctx.files.srcs))]
+
+        leaf = rule(
+            implementation = _leaf_impl,
+            attrs = {"srcs": attr.label_list(allow_files = True)},
+        )
+
+        def _top_impl(ctx):
+            out = ctx.actions.declare_file(ctx.label.name + ".txt")
+            files = depset(transitive = [d[Info].files for d in ctx.attr.deps])
+            ctx.actions.write(out, "\\n".join([f.basename for f in files.to_list()]))
+            return [DefaultInfo(files = depset([out]))]
+
+        top = rule(implementation = _top_impl, attrs = {"deps": attr.label_list()})
+        """);
+    write("prov/BUILD");
+    write(
+        "lib/BUILD",
+        "load('//prov:defs.bzl', 'leaf')",
+        "leaf(name = 'leaf', srcs = ['a.txt'], visibility = ['//visibility:public'])");
+    write("lib/a.txt", "a");
+    write("app/BUILD", "load('//prov:defs.bzl', 'top')", "top(name = 'top', deps = ['//lib:leaf'])");
+    upload("//app:top");
+
+    // The consumer is analysed again, on a fresh evaluator whose Info has never been instantiated,
+    // and reads the depset out of the cached leaf's provider.
+    clientChanges = ImmutableList.of("app/BUILD");
+    download("//app:top");
+
+    assertThat(output("app", "top.txt")).isEqualTo("a.txt");
+  }
+
+  @Test
   public void uncommittedChange_writerLeavesOutWhatItReaches() throws Exception {
     write("clean/BUILD", "genrule(name = 'a', outs = ['a.txt'], cmd = 'echo a > $@')");
     write(
