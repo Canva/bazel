@@ -45,6 +45,7 @@ import com.google.devtools.build.lib.skyframe.TraversalRequest.DirectTraversalRo
 import com.google.devtools.build.lib.skyframe.serialization.SkyValueRetriever;
 import com.google.devtools.build.lib.skyframe.serialization.SkyValueRetriever.RetrievalContext;
 import com.google.devtools.build.lib.skyframe.serialization.SkyValueRetriever.SerializableSkyKeyComputeState;
+import com.google.devtools.build.lib.skyframe.serialization.analysis.ExecutionValueCaching;
 import com.google.devtools.build.lib.skyframe.serialization.analysis.RemoteAnalysisCacheReaderDepsProvider;
 import com.google.devtools.build.lib.util.DetailedExitCode;
 import com.google.devtools.build.lib.util.Fingerprint;
@@ -145,6 +146,7 @@ public final class ArtifactFunction implements SkyFunction {
         cachingDependenciesSupplier.get();
     if (remoteCachingDependencies.mode().isRetrievalEnabled()
         && !remoteCachingDependencies.getSkycacheAnalysisOnly()
+        && ExecutionValueCaching.isEnabled()
         && !actionExecutor.shouldSkipRetrieval(derivedArtifact.getGeneratingActionKey())) {
       switch (retrieveRemoteSkyValue(artifact, env, remoteCachingDependencies, State::new)) {
         case SkyValueRetriever.Restart unused:

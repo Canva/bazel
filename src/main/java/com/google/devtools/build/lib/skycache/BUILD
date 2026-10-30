@@ -36,6 +36,7 @@ java_library(
         "//src/main/java/com/google/devtools/build/lib/skyframe/serialization/analysis/proto:analysis_cache_service_metadata_status_java_proto",
         "//src/main/java/com/google/devtools/build/lib/skyframe/serialization/analysis/proto:analysis_cache_service_miss_reason_java_proto",
         "//src/main/java/com/google/devtools/build/lib/skyframe/serialization/analysis:client_id",
+        "//src/main/java/com/google/devtools/build/lib/skyframe/serialization/analysis:execution_value_caching",
         "//src/main/java/com/google/devtools/build/lib/skyframe/serialization/analysis:file_dependency_serializer",
         "//src/main/java/com/google/devtools/build/lib/skyframe/serialization/analysis:lookup_result",
         "//src/main/java/com/google/devtools/build/lib/skyframe/serialization/analysis:lookup_result_impl",

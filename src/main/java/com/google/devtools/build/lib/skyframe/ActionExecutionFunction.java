@@ -85,6 +85,7 @@ import com.google.devtools.build.lib.skyframe.rewinding.ActionRewindStrategy.Rew
 import com.google.devtools.build.lib.skyframe.serialization.SkyValueRetriever;
 import com.google.devtools.build.lib.skyframe.serialization.SkyValueRetriever.RetrievalContext;
 import com.google.devtools.build.lib.skyframe.serialization.SkyValueRetriever.SerializableSkyKeyComputeState;
+import com.google.devtools.build.lib.skyframe.serialization.analysis.ExecutionValueCaching;
 import com.google.devtools.build.lib.skyframe.serialization.analysis.RemoteAnalysisCacheReaderDepsProvider;
 import com.google.devtools.build.lib.util.DetailedExitCode;
 import com.google.devtools.build.lib.util.DetailedExitCode.DetailedExitCodeComparator;
@@ -181,6 +182,7 @@ public class ActionExecutionFunction implements SkyFunction {
         cachingDependenciesSupplier.get();
     if (remoteCachingDependencies.mode().isRetrievalEnabled()
         && !remoteCachingDependencies.getSkycacheAnalysisOnly()
+        && ExecutionValueCaching.isEnabled()
         && !skyframeActionExecutor.shouldSkipRetrieval(actionLookupData)) {
       switch (retrieveRemoteSkyValue(
           actionLookupData, env, remoteCachingDependencies, InputDiscoveryState::new)) {

@@ -61,6 +61,12 @@ java_library(
 )
 
 java_library(
+    name = "execution_value_caching",
+    srcs = ["ExecutionValueCaching.java"],
+    visibility = ["//src:__subpackages__"],
+)
+
+java_library(
     name = "dependencies_provider",
     srcs = [
         "RemoteAnalysisCacheReaderDepsProvider.java",
@@ -77,6 +83,7 @@ java_library(
         "//src/test/java/com/google/devtools/build/lib/skyframe/serialization:__pkg__",
         "//src/test/java/com/google/devtools/build/lib/skyframe/serialization/analysis:__pkg__",
     ],
+    exports = [":execution_value_caching"],
     deps = [
         ":default_platform_configuration_provider",
         ":frontier_serializer",
@@ -134,6 +141,7 @@ java_library(
         "//src/test/java/com/google/devtools/build/lib/skyframe/serialization/analysis:__pkg__",
     ],
     deps = [
+        ":execution_value_caching",
         ":event_listener",
         ":file_dependency_serializer",
         ":file_op_node_map",

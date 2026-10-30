@@ -23,6 +23,7 @@ import com.google.common.collect.ImmutableSet;
 import com.google.common.eventbus.Subscribe;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.devtools.build.lib.actions.ActionLookupData;
+import com.google.devtools.build.lib.actions.ActionLookupKey;
 import com.google.devtools.build.lib.buildtool.util.BuildIntegrationTestCase;
 import com.google.devtools.build.lib.cmdline.LabelConstants;
 import com.google.devtools.build.lib.compress.CompressionService;
@@ -96,6 +97,7 @@ public final class SkycacheExecutionIntegrationTest extends BuildIntegrationTest
     FileDependencySerializer.setTolerateAbsoluteSymlinks(false);
     FileDependencySerializer.setRepositoryBoundary(null);
     FileDependencySerializer.setMaxDependencyVersion(FileDependencySerializer.UNBOUNDED);
+    ExecutionValueCaching.setEnabled(true);
     uncommitted = ImmutableSet.of();
   }
 
@@ -520,6 +522,23 @@ public final class SkycacheExecutionIntegrationTest extends BuildIntegrationTest
     download("//consumer:c");
 
     assertThat(output("consumer", "c.txt")).isEqualTo("a.txt\nb.txt\n");
+  }
+
+  @Test
+  public void executionValueCachingOff_uploadThatExecutedCarriesOnlyAnalysis() throws Exception {
+    ExecutionValueCaching.setEnabled(false);
+    writeTreeScenario();
+    upload("//consumer:c", /* execute= */ true);
+    var serialized =
+        getCommandEnvironment().getRemoteAnalysisCachingEventListener().getSerializedKeys();
+    assertThat(serialized.stream().anyMatch(ActionLookupData.class::isInstance)).isFalse();
+    assertThat(serialized.stream().anyMatch(ActionLookupKey.class::isInstance)).isTrue();
+
+    download("//consumer:c");
+
+    assertThat(output("consumer", "c.txt")).isEqualTo("a.txt\nb.txt\n");
+    // Not even looked up: the reader asks only for analysis values.
+    assertThat(lastClient.getInvalidationReasons()).doesNotContainKey("execution value");
   }
 
   @Test

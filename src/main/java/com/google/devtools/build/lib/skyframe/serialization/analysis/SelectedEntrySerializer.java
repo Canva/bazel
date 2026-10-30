@@ -356,6 +356,10 @@ final class SelectedEntrySerializer {
     }
     // TODO: b/371508153 - only upload nodes that were freshly computed by this invocation and
     // unaffected by local, un-submitted changes.
+    if (!(key instanceof ActionLookupKey) && !ExecutionValueCaching.isEnabled()) {
+      // See ExecutionValueCaching: nothing will read it, and it may not serialize.
+      return;
+    }
     writeStatuses.selectedEntryStartingCapped();
     try {
       switch (key) {
