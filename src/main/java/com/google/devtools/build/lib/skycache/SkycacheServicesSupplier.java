@@ -23,6 +23,7 @@ import build.aspect.skycache.v1.AnalysisCacheGrpc.AnalysisCacheFutureStub;
 import com.canva.skycache.v1.SnapshotIndexGrpc;
 import com.canva.skycache.v1.SnapshotIndexGrpc.SnapshotIndexFutureStub;
 import com.google.auth.Credentials;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.devtools.build.lib.authandtls.AuthAndTLSOptions;
@@ -49,6 +50,8 @@ import io.grpc.CallCredentials;
 import io.grpc.ManagedChannel;
 import java.io.IOException;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 import java.time.Clock;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -104,6 +107,12 @@ final class SkycacheServicesSupplier implements RemoteAnalysisCachingServicesSup
   @Nullable private RemoteAnalysisCacheClient client;
   @Nullable private FingerprintValueStore store;
   @Nullable private GrpcFingerprintValueStore grpcStore;
+
+  /** {@link #grpcStore}, or that and its mirrors. */
+  @Nullable private FingerprintValueStore remoteStore;
+
+  private ImmutableList<MirroredFingerprintValueStore.Mirror> mirrors = ImmutableList.of();
+  private final List<ManagedChannel> mirrorChannels = new ArrayList<>();
   @Nullable private LocalAnalysisStore local;
   @Nullable private BatchingGetQueue gets;
   @Nullable private ScheduledExecutorService scheduler;
@@ -197,7 +206,15 @@ final class SkycacheServicesSupplier implements RemoteAnalysisCachingServicesSup
           RemoteAnalysisCaching.Code.REMOTE_ANALYSIS_CACHING_UNKNOWN);
     }
 
-    SnapshotIndex remoteIndex = target.isEmpty() ? null : connect(target, cachingOptions, servicesOptions);
+    SkycacheMirrorOptions mirrorOptions = optionsProvider.getOptions(SkycacheMirrorOptions.class);
+    SnapshotIndex remoteIndex =
+        target.isEmpty()
+            ? null
+            : connect(
+                target,
+                cachingOptions,
+                servicesOptions,
+                mirrorOptions == null ? ImmutableList.of() : mirrorOptions.getMirrors());
     if (!localPath.isEmpty()) {
       try {
         local = LocalAnalysisStore.open(Path.of(localPath), localOptions.getLocalMaxSize());
@@ -209,8 +226,8 @@ final class SkycacheServicesSupplier implements RemoteAnalysisCachingServicesSup
     }
     store =
         local == null
-            ? grpcStore
-            : grpcStore == null ? local : new TieredFingerprintValueStore(local, grpcStore);
+            ? remoteStore
+            : remoteStore == null ? local : new TieredFingerprintValueStore(local, remoteStore);
 
     if (base != null && servicesOptions.getAnalysisCacheEnableMetadataQueries()) {
       // Only a git-versioned command has a commit to record or look up, and only a store that
@@ -234,30 +251,15 @@ final class SkycacheServicesSupplier implements RemoteAnalysisCachingServicesSup
   private SnapshotIndex connect(
       String target,
       RemoteAnalysisCachingOptions cachingOptions,
-      RemoteAnalysisCachingServicesOptions servicesOptions)
+      RemoteAnalysisCachingServicesOptions servicesOptions,
+      List<String> mirrorTargets)
       throws SerializedAbruptExitException {
     if (authAndTlsOptions == null) {
       throw abruptExit(
           "the analysis cache was configured before its credentials were resolved",
           RemoteAnalysisCaching.Code.REMOTE_ANALYSIS_CACHING_UNKNOWN);
     }
-    try {
-      // Bazel's own channel builder rather than a hand-rolled one: it decides TLS from the target's
-      // scheme the way --remote_cache does, applies --tls_certificate and the grpc keepalive
-      // options, honours a proxy, and lifts the inbound message limit.
-      channel =
-          GoogleAuthUtils.newChannel(
-              /* executor= */ null,
-              target,
-              /* proxy= */ null,
-              authAndTlsOptions,
-              /* interceptors= */ null,
-              /* serviceConfig= */ null);
-    } catch (IOException e) {
-      throw abruptExit(
-          "connecting to the remote analysis cache at " + target + ": " + e.getMessage(),
-          RemoteAnalysisCaching.Code.INVALID_SERVER_ADDRESS);
-    }
+    channel = newChannel(target);
 
     scheduler = Executors.newSingleThreadScheduledExecutor();
     // The deadline is applied per call, not here: withDeadlineAfter on a stored stub is absolute
@@ -297,7 +299,59 @@ final class SkycacheServicesSupplier implements RemoteAnalysisCachingServicesSup
                 scheduler));
     // Strips headers without checking them; replaced when the command is git-versioned.
     client = new GrpcAnalysisCacheClient(gets);
-    return SnapshotIndex.of(snapshotStub);
+    SnapshotIndex index = SnapshotIndex.of(snapshotStub);
+    if (mirrorTargets.isEmpty()) {
+      remoteStore = grpcStore;
+      return index;
+    }
+
+    var mirrors = ImmutableList.<MirroredFingerprintValueStore.Mirror>builder();
+    for (String mirrorTarget : mirrorTargets) {
+      ManagedChannel mirrorChannel = newChannel(mirrorTarget);
+      mirrorChannels.add(mirrorChannel);
+      AnalysisCacheFutureStub mirrorStub =
+          AnalysisCacheGrpc.newFutureStub(mirrorChannel)
+              .withMaxOutboundMessageSize(MAX_OUTBOUND_MESSAGE_BYTES);
+      SnapshotIndexFutureStub mirrorSnapshotStub = SnapshotIndexGrpc.newFutureStub(mirrorChannel);
+      if (callCredentials != null) {
+        mirrorStub = mirrorStub.withCallCredentials(callCredentials);
+        mirrorSnapshotStub = mirrorSnapshotStub.withCallCredentials(callCredentials);
+      }
+      mirrors.add(
+          new MirroredFingerprintValueStore.Mirror(
+              mirrorTarget,
+              new BatchingPutQueue(
+                  mirrorStub,
+                  servicesOptions.getMaxBatchSize(),
+                  PUT_LINGER_MILLIS,
+                  deadlineMillis,
+                  scheduler),
+              SnapshotIndex.of(mirrorSnapshotStub)));
+    }
+    this.mirrors = mirrors.build();
+    remoteStore = new MirroredFingerprintValueStore(grpcStore, this.mirrors);
+    return SnapshotIndex.mirrored(index, this.mirrors);
+  }
+
+  /**
+   * Opens a channel with Bazel's own builder rather than a hand-rolled one: it decides TLS from the
+   * target's scheme the way --remote_cache does, applies --tls_certificate, the client certificate
+   * and the grpc keepalive options, honours a proxy, and lifts the inbound message limit.
+   */
+  private ManagedChannel newChannel(String target) throws SerializedAbruptExitException {
+    try {
+      return GoogleAuthUtils.newChannel(
+          /* executor= */ null,
+          target,
+          /* proxy= */ null,
+          authAndTlsOptions,
+          /* interceptors= */ null,
+          /* serviceConfig= */ null);
+    } catch (IOException e) {
+      throw abruptExit(
+          "connecting to the remote analysis cache at " + target + ": " + e.getMessage(),
+          RemoteAnalysisCaching.Code.INVALID_SERVER_ADDRESS);
+    }
   }
 
   /**
@@ -431,6 +485,9 @@ final class SkycacheServicesSupplier implements RemoteAnalysisCachingServicesSup
     if (grpcStore != null) {
       grpcStore.flush();
     }
+    for (MirroredFingerprintValueStore.Mirror mirror : mirrors) {
+      mirror.flush();
+    }
     shedAtReset = gets == null ? 0 : gets.shed();
     if (local != null) {
       // Indexes this command's writes, after which other servers can read them.
@@ -454,6 +511,12 @@ final class SkycacheServicesSupplier implements RemoteAnalysisCachingServicesSup
       channel.shutdown();
       channel = null;
     }
+    for (ManagedChannel mirrorChannel : mirrorChannels) {
+      mirrorChannel.shutdown();
+    }
+    mirrorChannels.clear();
+    mirrors = ImmutableList.of();
+    remoteStore = null;
     client = null;
     validation = null;
     base = null;

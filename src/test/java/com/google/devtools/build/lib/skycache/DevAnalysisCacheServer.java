@@ -73,6 +73,10 @@ public final class DevAnalysisCacheServer extends AnalysisCacheGrpc.AnalysisCach
     responseObserver.onCompleted();
   }
 
+  boolean has(ByteString key) {
+    return entries.containsKey(key);
+  }
+
   private String counters() {
     return String.format(
         "entries=%d offered=%d requested=%d hit=%d snapshots=%d",

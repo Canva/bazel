@@ -148,7 +148,8 @@ public final class SkycacheModule extends SerializationModule {
             AuthAndTLSOptions.class,
             RemoteAnalysisCachingServicesOptions.class,
             SkycacheGitOptions.class,
-            SkycacheLocalOptions.class)
+            SkycacheLocalOptions.class,
+            SkycacheMirrorOptions.class)
         : ImmutableList.of();
   }
 
