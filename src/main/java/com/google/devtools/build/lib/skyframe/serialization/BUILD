@@ -116,6 +116,7 @@ java_library(
             "KeyBytesProvider.java",
             "ModuleCodec.java",
             "SerializationRegistrySetupHelpers.java",
+            "StarlarkFunctionCodec.java",
             "SerializationConstants.java",
             "SerializationModule.java",
             "SkycacheMetadataParams.java",
@@ -243,13 +244,18 @@ java_library(
 
 java_library(
     name = "module_codec",
-    srcs = ["ModuleCodec.java"],
+    srcs = [
+        "ModuleCodec.java",
+        "StarlarkFunctionCodec.java",
+    ],
     deps = [
         ":serialization",
         "//src/main/java/com/google/devtools/build/lib/cmdline",
         "//src/main/java/com/google/devtools/build/lib/skyframe:bzl_load_value",
+        "//src/main/java/com/google/devtools/build/lib/unsafe:unsafe-provider",
         "//src/main/java/net/starlark/java/eval",
         "//third_party/java/guava:base",
+        "//third_party/java/guava:collect",
         "//third_party/java/protobuf:protobuf_lite",
     ],
 )

@@ -373,6 +373,60 @@ public final class SkycacheExecutionIntegrationTest extends BuildIntegrationTest
   }
 
   @Test
+  public void starlarkFunctions_inACachedProvider_callableByAReanalyzedConsumer()
+      throws Exception {
+    write(
+        "fn/defs.bzl",
+        """
+        FnInfo = provider(fields = ["global_fn", "closure"])
+
+        def _shout(s):
+            return s.upper()
+
+        def _make(prefix):
+            def closure(s):
+                return prefix + s
+            return closure
+
+        def _lib_impl(ctx):
+            return [FnInfo(global_fn = _shout, closure = _make(ctx.attr.prefix))]
+
+        lib = rule(implementation = _lib_impl, attrs = {"prefix": attr.string()})
+
+        def _base(f):
+            return f.basename
+
+        def _app_impl(ctx):
+            info = ctx.attr.dep[FnInfo]
+            out = ctx.actions.declare_file(ctx.label.name + ".txt")
+            args = ctx.actions.args()
+            args.add(out)
+            args.add_all([out], map_each = _base)
+            ctx.actions.run_shell(
+                outputs = [out],
+                command = 'echo "$3 $4 $2" > $1',
+                arguments = [args, info.global_fn("hi"), info.closure("there")],
+            )
+            return [DefaultInfo(files = depset([out]))]
+
+        app = rule(implementation = _app_impl, attrs = {"dep": attr.label()})
+        """);
+    write("fn/BUILD");
+    write(
+        "fnlib/BUILD",
+        "load('//fn:defs.bzl', 'lib')",
+        "lib(name = 'lib', prefix = 'well ', visibility = ['//visibility:public'])");
+    write("fnapp/BUILD", "load('//fn:defs.bzl', 'app')", "app(name = 'app', dep = '//fnlib:lib')");
+    upload("//fnapp:app");
+
+    // The consumer runs again, on a fresh evaluator, and calls functions read from the cache.
+    clientChanges = ImmutableList.of("fnapp/BUILD");
+    download("//fnapp:app");
+
+    assertThat(output("fnapp", "app.txt")).isEqualTo("HI well there app.txt\n");
+  }
+
+  @Test
   public void schemafulProviderDepset_readByAReanalyzedConsumer() throws Exception {
     write(
         "prov/defs.bzl",

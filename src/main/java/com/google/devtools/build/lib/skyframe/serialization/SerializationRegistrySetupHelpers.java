@@ -185,6 +185,7 @@ public final class SerializationRegistrySetupHelpers {
               .add(new DeferredNestedSetCodec())
               .add(new ValueSharingAdapter<>(Label.deferredCodec()))
               .add(ModuleCodec.moduleCodec())
+              .add(StarlarkFunctionCodec.starlarkFunctionCodec())
               .add(new ValueSharingAdapter<>(PackageIdentifier.deferredCodec()))
               .add(new ValueSharingAdapter<>(RepositoryMapping.deferredCodec()))
               .add(ConfiguredTargetKey.valueSharingCodec())
