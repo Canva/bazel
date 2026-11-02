@@ -40,6 +40,7 @@ import com.google.devtools.build.lib.analysis.configuredtargets.RuleConfiguredTa
 import com.google.devtools.build.lib.analysis.test.TestConfiguration;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.cmdline.PackageIdentifier;
+import com.google.devtools.build.lib.cmdline.RepositoryMapping;
 import com.google.devtools.build.lib.collect.nestedset.DeferredNestedSetCodec;
 import com.google.devtools.build.lib.packages.BazelStarlarkEnvironment;
 import com.google.devtools.build.lib.packages.StructProvider;
@@ -185,6 +186,7 @@ public final class SerializationRegistrySetupHelpers {
               .add(new ValueSharingAdapter<>(Label.deferredCodec()))
               .add(ModuleCodec.moduleCodec())
               .add(new ValueSharingAdapter<>(PackageIdentifier.deferredCodec()))
+              .add(new ValueSharingAdapter<>(RepositoryMapping.deferredCodec()))
               .add(ConfiguredTargetKey.valueSharingCodec())
               .add(TransitiveInfoProviderMapImpl.valueSharingCodec())
               .add(RemoteConfiguredTargetValue.codec())

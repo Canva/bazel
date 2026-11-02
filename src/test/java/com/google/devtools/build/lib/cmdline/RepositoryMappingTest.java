@@ -17,6 +17,7 @@ package com.google.devtools.build.lib.cmdline;
 import static com.google.common.truth.Truth.assertThat;
 
 import com.google.common.collect.ImmutableMap;
+import com.google.devtools.build.lib.skyframe.serialization.testutils.SerializationTester;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
@@ -67,5 +68,27 @@ public final class RepositoryMappingTest {
             ImmutableMap.of("foo", RepositoryName.create("foo_internal")), RepositoryName.MAIN);
     assertThat(mapping.get("boo").getNameWithAt())
         .isEqualTo("@@[unknown repo 'boo' requested from @@ (did you mean 'foo'?)]");
+  }
+
+  @Test
+  public void codec_roundTripsBothVariants() throws Exception {
+    RepositoryMapping mapping =
+        RepositoryMapping.create(
+            ImmutableMap.of(
+                "",
+                RepositoryName.MAIN,
+                "rules_go",
+                RepositoryName.createUnvalidated("rules_go+")),
+            RepositoryName.createUnvalidated("some_module+"));
+    new SerializationTester(mapping, mapping.withCachedInverseMap(), RepositoryMapping.EMPTY)
+        .addCodec(RepositoryMapping.deferredCodec())
+        .setVerificationFunction(
+            (RepositoryMapping original, RepositoryMapping deserialized) -> {
+              assertThat(deserialized).isEqualTo(original);
+              assertThat(deserialized.hasCachedInverse()).isEqualTo(original.hasCachedInverse());
+              assertThat(deserialized.getInverse(RepositoryName.createUnvalidated("rules_go+")))
+                  .isEqualTo(original.getInverse(RepositoryName.createUnvalidated("rules_go+")));
+            })
+        .runTests();
   }
 }
