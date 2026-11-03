@@ -555,13 +555,20 @@ public final class RemoteModule extends BlazeModule {
             ? ImmutableList.copyOf(remoteOptions.getRemoteDownloadRegex())
             : ImmutableList.of();
 
+    // Only a command that executes actions completes targets and downloads outputs, so only such a
+    // command can make the completions of the previous build stale, and only its download policy
+    // is worth remembering. A non-building command (e.g. info or query) is compared against nothing
+    // and leaves the previous build's checker in place for the next build to compare against.
+    boolean executes = env.getCommand().buildPhase().executes();
     remoteOutputChecker =
         new RemoteOutputChecker(
             env.getCommandName(),
             remoteOptions.getRemoteOutputsMode(),
             downloadRegexes,
-            lastRemoteOutputChecker);
-    remoteOutputChecker.maybeInvalidateSkyframeValues(env.getSkyframeExecutor().getEvaluator());
+            executes ? lastRemoteOutputChecker : null);
+    if (executes) {
+      remoteOutputChecker.maybeInvalidateSkyframeValues(env.getSkyframeExecutor().getEvaluator());
+    }
 
     env.getEventBus().register(this);
     String invocationId = env.getCommandId().toString();
@@ -1115,8 +1122,11 @@ public final class RemoteModule extends BlazeModule {
     if (remoteOutputChecker != null) {
       remoteOutputChecker.clearPreviousCommand();
     }
-    lastRemoteOutputChecker = remoteOutputChecker;
-    lastBuildId = Preconditions.checkNotNull(env).getCommandId().toString();
+    if (Preconditions.checkNotNull(env).getCommand().buildPhase().executes()) {
+      // See setup() for why non-building commands do not replace the previous build's checker.
+      lastRemoteOutputChecker = remoteOutputChecker;
+    }
+    lastBuildId = env.getCommandId().toString();
 
     buildEventArtifactUploaderFactoryDelegate.reset();
     repositoryRemoteHelpersFactoryDelegate.reset();
