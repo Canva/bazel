@@ -45,7 +45,11 @@ public interface LazyMaterializer {
    * Materializes the subtree rooted at the given path to the local file system if its contents are
    * currently only available in memory, together with the targets of any symlinks below it.
    *
-   * <p>Does nothing if the subtree is already backed by the local file system.
+   * <p>Does nothing if the subtree is already backed by the local file system. In particular,
+   * repeated calls for a subtree that has already been materialized by this method, or for a path
+   * below such a subtree, are no-ops and do not touch the local file system again until the
+   * contents of the enclosing directory tree are evicted from memory or fetched anew. Concurrent
+   * calls for the same subtree share a single materialization.
    */
   void ensureSubtreeMaterialized(PathFragment path) throws IOException, InterruptedException;
 }

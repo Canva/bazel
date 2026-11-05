@@ -25,6 +25,7 @@ import static org.mockito.Mockito.when;
 import build.bazel.remote.execution.v2.Directory;
 import build.bazel.remote.execution.v2.DirectoryNode;
 import build.bazel.remote.execution.v2.FileNode;
+import build.bazel.remote.execution.v2.SymlinkNode;
 import build.bazel.remote.execution.v2.Tree;
 import com.google.common.collect.ImmutableList;
 import com.google.devtools.build.lib.actions.ActionInput;
@@ -35,6 +36,7 @@ import com.google.devtools.build.lib.remote.util.InMemoryCacheClient;
 import com.google.devtools.build.lib.vfs.DigestHashFunction;
 import com.google.devtools.build.lib.vfs.FileSystemUtils;
 import com.google.devtools.build.lib.vfs.PathFragment;
+import com.google.devtools.build.lib.vfs.Symlinks;
 import com.google.devtools.build.lib.vfs.SyscallCache;
 import com.google.devtools.build.lib.vfs.inmemoryfs.InMemoryFileSystem;
 import com.google.devtools.build.skyframe.MemoizingEvaluator;
@@ -389,5 +391,171 @@ public final class RemoteExternalOverlayFileSystemTest {
     } finally {
       overlay.afterCommand();
     }
+  }
+
+  @Test
+  public void ensureSubtreeMaterialized_repeatedCalls_materializeOnlyOnce() throws Exception {
+    var digestUtil = new DigestUtil(SyscallCache.NO_CACHE, DigestHashFunction.SHA256);
+    var nativeFs = new InMemoryFileSystem(DigestHashFunction.SHA256);
+    var externalRoot = PathFragment.create("/output/external");
+    var overlay = new RemoteExternalOverlayFileSystem(externalRoot, nativeFs);
+    var prefetchCalls = new AtomicInteger();
+    var prefetcher = materializingPrefetcher(overlay, nativeFs, prefetchCalls);
+    overlay.beforeCommand(
+        new InMemoryCombinedCache(digestUtil),
+        prefetcher,
+        new Reporter(),
+        "build-request",
+        "command",
+        () -> mock(MemoizingEvaluator.class),
+        Duration.ofMinutes(1));
+    try {
+      var repo = RepositoryName.create("repo");
+      var repoDir = externalRoot.getChild(repo.getName());
+      var sysroot = repoDir.getChild("sysroot");
+      assertThat(overlay.injectRemoteRepo(repo, sysrootTree(digestUtil), "marker")).isTrue();
+      // Injection prefetches eagerly loaded files such as .bzl files in a single batch.
+      assertThat(prefetchCalls.getAndSet(0)).isEqualTo(1);
+
+      overlay.ensureSubtreeMaterialized(sysroot);
+
+      // Files and symlinks are prefetched in two separate batches.
+      assertThat(prefetchCalls.get()).isEqualTo(2);
+      var link = nativeFs.getPath(sysroot.getChild("link.h"));
+      assertThat(link.readSymbolicLink()).isEqualTo(PathFragment.create("data.h"));
+      assertThat(FileSystemUtils.readContent(link, UTF_8)).isEqualTo("contents");
+      long linkNodeId = link.stat(Symlinks.NOFOLLOW).getNodeId();
+      // The repo is still served from memory outside the materialized subtree.
+      assertThat(nativeFs.getPath(repoDir.getChild("BUILD")).exists()).isFalse();
+      assertThat(overlay.getPath(repoDir.getChild("BUILD")).exists()).isTrue();
+
+      // Repeated calls for the subtree or any path below it don't touch the file system again.
+      overlay.ensureSubtreeMaterialized(sysroot);
+      overlay.ensureSubtreeMaterialized(sysroot.getChild("sub"));
+      assertThat(prefetchCalls.get()).isEqualTo(2);
+      assertThat(link.stat(Symlinks.NOFOLLOW).getNodeId()).isEqualTo(linkNodeId);
+
+      // A different subtree of the same repo is materialized separately.
+      overlay.ensureSubtreeMaterialized(repoDir.getChild("other"));
+      assertThat(prefetchCalls.get()).isEqualTo(4);
+      assertThat(nativeFs.getPath(repoDir.getRelative("other/other.h")).exists()).isTrue();
+      assertThat(link.stat(Symlinks.NOFOLLOW).getNodeId()).isEqualTo(linkNodeId);
+    } finally {
+      overlay.afterCommand();
+    }
+  }
+
+  @Test
+  public void ensureSubtreeMaterialized_afterRefetch_materializesAgain() throws Exception {
+    var digestUtil = new DigestUtil(SyscallCache.NO_CACHE, DigestHashFunction.SHA256);
+    var nativeFs = new InMemoryFileSystem(DigestHashFunction.SHA256);
+    var externalRoot = PathFragment.create("/output/external");
+    var overlay = new RemoteExternalOverlayFileSystem(externalRoot, nativeFs);
+    var prefetchCalls = new AtomicInteger();
+    var prefetcher = materializingPrefetcher(overlay, nativeFs, prefetchCalls);
+    overlay.beforeCommand(
+        new InMemoryCombinedCache(digestUtil),
+        prefetcher,
+        new Reporter(),
+        "build-request",
+        "command",
+        () -> mock(MemoizingEvaluator.class),
+        Duration.ofMinutes(1));
+    try {
+      var repo = RepositoryName.create("repo");
+      var repoDir = externalRoot.getChild(repo.getName());
+      var sysroot = repoDir.getChild("sysroot");
+      var tree = sysrootTree(digestUtil);
+      assertThat(overlay.injectRemoteRepo(repo, tree, "marker")).isTrue();
+      assertThat(prefetchCalls.getAndSet(0)).isEqualTo(1);
+      overlay.ensureSubtreeMaterialized(sysroot);
+      assertThat(prefetchCalls.get()).isEqualTo(2);
+
+      // Injecting the repo again, e.g. after it has been refetched, deletes its contents from disk
+      // and forgets about the materialized subtree.
+      assertThat(overlay.injectRemoteRepo(repo, tree, "marker")).isTrue();
+      assertThat(prefetchCalls.getAndSet(0)).isEqualTo(3);
+      var link = nativeFs.getPath(sysroot.getChild("link.h"));
+      assertThat(link.exists(Symlinks.NOFOLLOW)).isFalse();
+
+      overlay.ensureSubtreeMaterialized(sysroot);
+
+      assertThat(prefetchCalls.get()).isEqualTo(2);
+      assertThat(link.readSymbolicLink()).isEqualTo(PathFragment.create("data.h"));
+      assertThat(FileSystemUtils.readContent(link, UTF_8)).isEqualTo("contents");
+
+      // Materializing the entire repo supersedes the subtree, and the repo is then served from
+      // the native file system, so further subtree calls are no-ops as well.
+      overlay.ensureMaterialized(repo, /* location= */ null, new Reporter());
+      assertThat(prefetchCalls.get()).isEqualTo(4);
+      overlay.ensureSubtreeMaterialized(sysroot);
+      assertThat(prefetchCalls.get()).isEqualTo(4);
+    } finally {
+      overlay.afterCommand();
+    }
+  }
+
+  /**
+   * Returns a tree with a {@code BUILD} file, a {@code sysroot} directory containing a file, a
+   * relative symlink to it and an empty subdirectory, and an unrelated {@code other} directory.
+   */
+  private static Tree sysrootTree(DigestUtil digestUtil) {
+    var digest = digestUtil.compute("contents".getBytes(UTF_8));
+    var subDir = Directory.getDefaultInstance();
+    var sysrootDir =
+        Directory.newBuilder()
+            .addFiles(FileNode.newBuilder().setName("data.h").setDigest(digest))
+            .addSymlinks(SymlinkNode.newBuilder().setName("link.h").setTarget("data.h"))
+            .addDirectories(
+                DirectoryNode.newBuilder().setName("sub").setDigest(digestUtil.compute(subDir)))
+            .build();
+    var otherDir =
+        Directory.newBuilder()
+            .addFiles(FileNode.newBuilder().setName("other.h").setDigest(digest))
+            .build();
+    var rootDir =
+        Directory.newBuilder()
+            .addFiles(FileNode.newBuilder().setName("BUILD").setDigest(digest))
+            .addDirectories(
+                DirectoryNode.newBuilder()
+                    .setName("sysroot")
+                    .setDigest(digestUtil.compute(sysrootDir)))
+            .addDirectories(
+                DirectoryNode.newBuilder().setName("other").setDigest(digestUtil.compute(otherDir)))
+            .build();
+    return Tree.newBuilder()
+        .setRoot(rootDir)
+        .addChildren(sysrootDir)
+        .addChildren(subDir)
+        .addChildren(otherDir)
+        .build();
+  }
+
+  /**
+   * Returns a mock prefetcher that materializes the requested files and symlinks from the overlay
+   * to the native file system and counts its invocations.
+   */
+  private static AbstractActionInputPrefetcher materializingPrefetcher(
+      RemoteExternalOverlayFileSystem overlay, InMemoryFileSystem nativeFs, AtomicInteger calls) {
+    var prefetcher = mock(AbstractActionInputPrefetcher.class);
+    when(prefetcher.prefetchFilesInterruptibly(isNull(), any(), any(), any(), any()))
+        .thenAnswer(
+            invocation -> {
+              calls.incrementAndGet();
+              Iterable<? extends ActionInput> inputs = invocation.getArgument(1);
+              for (var input : inputs) {
+                var source = overlay.getPath(input.getExecPath());
+                var target = nativeFs.getPath(input.getExecPath());
+                target.getParentDirectory().createDirectoryAndParents();
+                if (source.isSymbolicLink()) {
+                  target.delete();
+                  target.createSymbolicLink(source.readSymbolicLink());
+                } else {
+                  FileSystemUtils.writeContent(target, UTF_8, "contents");
+                }
+              }
+              return immediateVoidFuture();
+            });
+    return prefetcher;
   }
 }

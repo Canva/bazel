@@ -95,8 +95,19 @@ public final class RemoteExternalOverlayFileSystem extends FileSystem implements
   private final FileSystem nativeFs;
   private final RemoteExternalFileSystem externalFs;
   private final TaskDeduplicator<String, Void, Void> materializations = new TaskDeduplicator<>();
+  // Deduplicates concurrent subtree materializations within the same repo. The attributes of an
+  // execution are the path of the subtree it materializes, which lets a caller join an ongoing
+  // execution for any ancestor of its own path.
+  private final TaskDeduplicator<String, PathFragment, Void> subtreeMaterializations =
+      new TaskDeduplicator<>();
   // The names of the repos whose contents have been fully materialized to nativeFs.
   private final Set<String> materializedRepos = ConcurrentHashMap.newKeySet();
+  // The subtrees of repos that are still served from memory but have been materialized to nativeFs
+  // via ensureSubtreeMaterialized, keyed by repo name. Entries are only added after the
+  // materialization has fully completed and are cleared together with the in-memory contents of
+  // the repo, so that a repo that is refetched or evicted is materialized again.
+  private final ConcurrentHashMap<String, Set<PathFragment>> materializedSubtrees =
+      new ConcurrentHashMap<>();
   // As long as a repo name appears as a key in this map, the repo contents are available in
   // externalFs.
   private final ConcurrentHashMap<String, String> markerFileContents = new ConcurrentHashMap<>();
@@ -203,6 +214,7 @@ public final class RemoteExternalOverlayFileSystem extends FileSystem implements
       throw new IllegalStateException("In-memory file system is not expected to throw", e);
     }
     materializedRepos.remove(repoName);
+    materializedSubtrees.remove(repoName);
     markerFileContents.remove(repoName);
   }
 
@@ -227,6 +239,8 @@ public final class RemoteExternalOverlayFileSystem extends FileSystem implements
     var repoDir = externalDirectory.getChild(repo.getName());
     deleteTree(repoDir);
     materializedRepos.remove(repo.getName());
+    // The subtrees materialized for the previous injection have just been deleted from disk.
+    materializedSubtrees.remove(repo.getName());
     var unused = delete(externalDirectory.getChild(repo.getMarkerFileName()));
     var filesToPrefetch = new LinkedHashSet<PathFragment>();
     var symlinksToPrefetch = new ArrayList<PathFragment>();
@@ -511,6 +525,8 @@ public final class RemoteExternalOverlayFileSystem extends FileSystem implements
     reporter.handle(Event.debug(location, "Materializing remote repo %s".formatted(repo)));
     materializeSubtree(externalDirectory.getChild(repo.getName()));
     materializedRepos.add(repo.getName());
+    // The whole repo is now served from nativeFs, which supersedes any materialized subtrees.
+    materializedSubtrees.remove(repo.getName());
 
     // After the repo has been copied, atomically materialize the marker file. This ensures that the
     // repo doesn't have to be refetched after the next server restart.
@@ -569,7 +585,12 @@ public final class RemoteExternalOverlayFileSystem extends FileSystem implements
    * repo whose contents are currently only available in memory.
    *
    * <p>This is used to make the files below a source directory action input available to local
-   * actions, which access them through the native file system.
+   * actions, which access them through the native file system. Since many actions may share the
+   * same source directory input, a subtree is only materialized once per injection of its repo:
+   * subsequent calls for the same or a nested path return immediately, and concurrent callers join
+   * an ongoing materialization that covers their path instead of starting their own. Repeating the
+   * materialization would otherwise delete and recreate the symlinks below the subtree while
+   * actions that were already prefetched read through them.
    */
   @Override
   public void ensureSubtreeMaterialized(PathFragment path)
@@ -577,7 +598,50 @@ public final class RemoteExternalOverlayFileSystem extends FileSystem implements
     if (fsForPath(path) != externalFs) {
       return;
     }
-    materializeSubtree(path);
+    String repoName = path.getSegment(externalDirectorySegmentCount);
+    if (isSubtreeMaterialized(repoName, path)) {
+      return;
+    }
+    var unused =
+        getFromFuture(
+            subtreeMaterializations.execute(
+                repoName,
+                /* attributes= */ path,
+                /* canJoin= */ ongoingPath -> path.startsWith(ongoingPath),
+                () -> {
+                  // Another caller may have finished since the presence check above.
+                  if (isSubtreeMaterialized(repoName, path)) {
+                    return immediateVoidFuture();
+                  }
+                  return materializationExecutor.submit(
+                      () -> {
+                        materializeSubtree(path);
+                        // Only record the subtree after all of its files and symlinks are in place
+                        // so that no caller returns before the subtree is complete. Nothing is
+                        // recorded if the materialization fails, so the next caller retries it.
+                        materializedSubtrees
+                            .computeIfAbsent(repoName, unusedKey -> ConcurrentHashMap.newKeySet())
+                            .add(path);
+                        return null;
+                      });
+                }));
+  }
+
+  /**
+   * Returns whether the given path lies in a subtree of the given repo that has been materialized
+   * since the repo was last injected.
+   */
+  private boolean isSubtreeMaterialized(String repoName, PathFragment path) {
+    var subtrees = materializedSubtrees.get(repoName);
+    if (subtrees == null) {
+      return false;
+    }
+    for (PathFragment subtree : subtrees) {
+      if (path.startsWith(subtree)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private void materializeSubtree(PathFragment path) throws IOException, InterruptedException {
@@ -700,6 +764,7 @@ public final class RemoteExternalOverlayFileSystem extends FileSystem implements
           return externalFs;
         }
         materializedRepos.remove(repoName);
+        materializedSubtrees.remove(repoName);
         markerFileContents.remove(repoName);
       }
       // Fall back to the native file system if the repo has been materialized, deleted, or never

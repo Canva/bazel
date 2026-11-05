@@ -1332,6 +1332,115 @@ class RemoteRepoContentsCacheTest(
     with open(out) as f:
       self.assertEqual(f.read(), 'shared-data\nnested-data\n')
 
+  def testUseSourceDirectoryInManyConcurrentActions_symlinksStayInPlace(self):
+    # Regression test for https://github.com/bazelbuild/bazel/issues/32416:
+    # many local actions sharing a source directory input out of the remote
+    # repo contents cache used to materialize it once per action, deleting and
+    # recreating every symlink below it while other actions were reading
+    # through them.
+    if self.IsWindows():
+      self.ScratchFile(
+          '.bazelrc',
+          ['startup --windows_enable_symlinks'],
+          mode='a',
+      )
+    self.ScratchFile(
+        'MODULE.bazel',
+        [
+            'repo = use_repo_rule("//:repo.bzl", "repo")',
+            'repo(name = "my_repo")',
+        ],
+    )
+    self.ScratchFile('BUILD.bazel')
+    self.ScratchFile(
+        'repo.bzl',
+        [
+            'def _repo_impl(rctx):',
+            '  rctx.file("BUILD")',
+            (
+                '  rctx.file("root/BUILD", "filegroup(name=\'root\','
+                " srcs=['.'], visibility=['//visibility:public'])\")"
+            ),
+            '  for i in range(1, 201):',
+            '    rctx.file("root/usr/lib/f%d.h" % i, "// header %d\\n" % i)',
+            '    rctx.symlink("root/usr/lib/f%d.h" % i, "root/usr/lib/l%d.h" % i)',
+            '  rctx.symlink("root/usr/lib", "root/lib")',
+            '  print("JUST FETCHED")',
+            '  return rctx.repo_metadata(reproducible=True)',
+            'repo = repository_rule(_repo_impl)',
+        ],
+    )
+    # Each action reads every file through the symlinks for about two seconds
+    # so that the actions overlap with the materializations triggered by the
+    # actions that start after them. The builds below limit the number of
+    # concurrent actions so that actions keep starting while others are reading.
+    reader_cmd = (
+        'd=$(location @my_repo//root);'
+        ' end=$$((SECONDS + 2));'
+        ' while (( SECONDS < end )); do'
+        '   for f in $$d/lib/f*.h $$d/lib/l*.h; do'
+        '     cat $$f > /dev/null || { echo MISSING: $$f >&2; exit 1; };'
+        '   done;'
+        ' done;'
+        ' echo ok > $@'
+    )
+    self.ScratchFile(
+        'main/BUILD.bazel',
+        [
+            '[genrule(',
+            '  name = "reader_%d" % i,',
+            '  srcs = ["@my_repo//root"],',
+            '  outs = ["reader_%d.txt" % i],',
+            '  cmd = "' + reader_cmd + '",',
+            '  tags = ["no-cache"],',
+            ') for i in range(40)]',
+        ],
+    )
+
+    repo_dir = self.RepoDir('my_repo')
+    lib_link = os.path.join(repo_dir, 'root/lib')
+    build_cmd = ['build', '//main:all', '--jobs=8']
+
+    # First fetch: not cached
+    _, _, stderr = self.RunBazel(build_cmd + ['--action_env=NONCE=seed'])
+    self.assertIn('JUST FETCHED', '\n'.join(stderr))
+
+    # After expunging: the repo is a remote cache hit and is not fully
+    # materialized. All no-cache actions run locally and concurrently, and
+    # every one of them must be able to read all files through the symlinks
+    # below the source directory for its entire duration.
+    self.RunBazel(['clean', '--expunge'])
+    _, _, stderr = self.RunBazel(build_cmd + ['--action_env=NONCE=run1'])
+    self.assertNotIn('JUST FETCHED', '\n'.join(stderr))
+    self.assertNotIn('MISSING', '\n'.join(stderr))
+    self.assertFalse(os.path.exists(os.path.join(repo_dir, 'BUILD')))
+    self.assertTrue(os.path.islink(lib_link))
+    self.assertTrue(os.path.islink(os.path.join(repo_dir, 'root/lib/l200.h')))
+    for i in range(40):
+      with open(self.Path('bazel-bin/main/reader_%d.txt' % i)) as f:
+        self.assertEqual(f.read(), 'ok\n')
+
+    # The next build re-injects the repo from the remote cache before any
+    # action runs (see https://github.com/bazelbuild/bazel/issues/32179), which
+    # legitimately recreates the materialized subtree. The actions must still
+    # succeed.
+    _, _, stderr = self.RunBazel(build_cmd + ['--action_env=NONCE=run2'])
+    self.assertNotIn('JUST FETCHED', '\n'.join(stderr))
+    self.assertNotIn('MISSING', '\n'.join(stderr))
+    lib_link_stat = os.lstat(lib_link)
+
+    # Once injected, the subtree is only materialized once per server lifetime:
+    # another build that executes all actions again must not replant the
+    # symlinks.
+    _, _, stderr = self.RunBazel(build_cmd + ['--action_env=NONCE=run3'])
+    self.assertNotIn('JUST FETCHED', '\n'.join(stderr))
+    self.assertNotIn('MISSING', '\n'.join(stderr))
+    if not self.IsWindows():
+      # Inode numbers and change times are only meaningful on POSIX.
+      new_lib_link_stat = os.lstat(lib_link)
+      self.assertEqual(new_lib_link_stat.st_ino, lib_link_stat.st_ino)
+      self.assertEqual(new_lib_link_stat.st_ctime_ns, lib_link_stat.st_ctime_ns)
+
   def testUseSourceDirectoryAndFileInputsInBuildRule_actionsDoNotUseCache(
       self,
   ):
