@@ -15,6 +15,11 @@ package com.google.devtools.build.lib.remote;
 
 import static com.google.common.truth.Truth.assertThat;
 import static org.junit.Assert.assertThrows;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.clearInvocations;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 
 import build.bazel.remote.execution.v2.Digest;
 import build.bazel.remote.execution.v2.Directory;
@@ -46,6 +51,7 @@ import com.google.devtools.build.lib.vfs.FileSystemUtils;
 import com.google.devtools.build.lib.vfs.OutputPermissions;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.PathFragment;
+import com.google.devtools.build.lib.vfs.Symlinks;
 import com.google.devtools.build.lib.vfs.SyscallCache;
 import com.google.devtools.build.lib.vfs.inmemoryfs.InMemoryFileSystem;
 import java.io.IOException;
@@ -178,6 +184,83 @@ public class RemoteActionInputFetcherTest extends ActionInputPrefetcherTestBase 
     assertThat(error)
         .hasMessageThat()
         .contains(String.format("%s/%s", digest.getHash(), digest.getSizeBytes()));
+  }
+
+  @Test
+  public void prefetchFiles_symlinkAlreadyPlantedWithSameTarget_isLeftUntouched()
+      throws Exception {
+    Map<ActionInput, FileArtifactValue> metadata = new HashMap<>();
+    Map<HashCode, byte[]> cas = new HashMap<>();
+    PathFragment resolvedPath = artifactRoot.getRoot().asPath().getChild("target").asFragment();
+    Artifact a = createRemoteArtifact("file", "hello world", resolvedPath, metadata, cas);
+    // The symlink is already in place, e.g. planted by a previous prefetch of the same input that
+    // has since been forgotten by the download cache.
+    a.getPath().createSymbolicLink(resolvedPath);
+    long nodeId = a.getPath().stat(Symlinks.NOFOLLOW).getNodeId();
+    AbstractActionInputPrefetcher prefetcher = createPrefetcher(cas);
+    clearInvocations(fs);
+
+    wait(
+        prefetcher.prefetchFilesInterruptibly(
+            action, metadata.keySet(), metadata::get, Priority.MEDIUM, Reason.INPUTS));
+
+    assertThat(a.getPath().readSymbolicLink()).isEqualTo(resolvedPath);
+    assertThat(FileSystemUtils.readContent(a.getPath(), StandardCharsets.UTF_8))
+        .isEqualTo("hello world");
+    assertThat(a.getPath().stat(Symlinks.NOFOLLOW).getNodeId()).isEqualTo(nodeId);
+    verify(fs, never()).delete(a.getPath().asFragment());
+    verify(fs, never()).createSymbolicLink(eq(a.getPath().asFragment()), any(), any());
+    verify(fs, never()).renameTo(any(), eq(a.getPath().asFragment()));
+    assertThat(prefetcher.downloadedFiles()).containsExactly(a.getPath(), fs.getPath(resolvedPath));
+  }
+
+  @Test
+  public void prefetchFiles_symlinkAlreadyPlantedWithDifferentTarget_isReplacedAtomically()
+      throws Exception {
+    Map<ActionInput, FileArtifactValue> metadata = new HashMap<>();
+    Map<HashCode, byte[]> cas = new HashMap<>();
+    PathFragment resolvedPath = artifactRoot.getRoot().asPath().getChild("target").asFragment();
+    PathFragment stalePath = artifactRoot.getRoot().asPath().getChild("stale").asFragment();
+    Artifact a = createRemoteArtifact("file", "hello world", resolvedPath, metadata, cas);
+    a.getPath().createSymbolicLink(stalePath);
+    AbstractActionInputPrefetcher prefetcher = createPrefetcher(cas);
+    clearInvocations(fs);
+
+    wait(
+        prefetcher.prefetchFilesInterruptibly(
+            action, metadata.keySet(), metadata::get, Priority.MEDIUM, Reason.INPUTS));
+
+    assertThat(a.getPath().readSymbolicLink()).isEqualTo(resolvedPath);
+    assertThat(FileSystemUtils.readContent(a.getPath(), StandardCharsets.UTF_8))
+        .isEqualTo("hello world");
+    // The stale symlink is replaced by renaming a new one over it rather than by deleting and
+    // recreating it, so that the path exists at every point in time.
+    verify(fs, never()).delete(a.getPath().asFragment());
+    verify(fs, never()).createSymbolicLink(eq(a.getPath().asFragment()), any(), any());
+    verify(fs).renameTo(any(), eq(a.getPath().asFragment()));
+    assertThat(tempPathGenerator.getTempDir().readdir(Symlinks.NOFOLLOW)).isEmpty();
+  }
+
+  @Test
+  public void prefetchFiles_regularFileAtSymlinkPath_isReplacedAtomically() throws Exception {
+    Map<ActionInput, FileArtifactValue> metadata = new HashMap<>();
+    Map<HashCode, byte[]> cas = new HashMap<>();
+    PathFragment resolvedPath = artifactRoot.getRoot().asPath().getChild("target").asFragment();
+    Artifact a = createRemoteArtifact("file", "hello world", resolvedPath, metadata, cas);
+    FileSystemUtils.writeContent(a.getPath(), StandardCharsets.UTF_8, "stale");
+    AbstractActionInputPrefetcher prefetcher = createPrefetcher(cas);
+    clearInvocations(fs);
+
+    wait(
+        prefetcher.prefetchFilesInterruptibly(
+            action, metadata.keySet(), metadata::get, Priority.MEDIUM, Reason.INPUTS));
+
+    assertThat(a.getPath().isSymbolicLink()).isTrue();
+    assertThat(a.getPath().readSymbolicLink()).isEqualTo(resolvedPath);
+    assertThat(FileSystemUtils.readContent(a.getPath(), StandardCharsets.UTF_8))
+        .isEqualTo("hello world");
+    verify(fs, never()).delete(a.getPath().asFragment());
+    verify(fs).renameTo(any(), eq(a.getPath().asFragment()));
   }
 
   @Test

@@ -58,12 +58,14 @@ import com.google.devtools.build.lib.remote.common.BulkTransferException;
 import com.google.devtools.build.lib.remote.common.CacheNotFoundException;
 import com.google.devtools.build.lib.remote.util.AsyncTaskCache;
 import com.google.devtools.build.lib.util.TempPathGenerator;
+import com.google.devtools.build.lib.vfs.FileStatus;
 import com.google.devtools.build.lib.vfs.FileSymlinkLoopException;
 import com.google.devtools.build.lib.vfs.FileSystem;
 import com.google.devtools.build.lib.vfs.FileSystemUtils;
 import com.google.devtools.build.lib.vfs.OutputPermissions;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.PathFragment;
+import com.google.devtools.build.lib.vfs.Symlinks;
 import io.reactivex.rxjava3.core.Completable;
 import java.io.IOException;
 import java.util.ArrayDeque;
@@ -909,13 +911,52 @@ public abstract class AbstractActionInputPrefetcher implements ActionInputPrefet
                 // exist yet.
                 checkNotNull(linkPath.getParentDirectory()).createDirectoryAndParents();
               }
-              // Delete the link path if it already exists. This is the case for tree artifacts,
-              // whose root directory is created before the action runs.
-              linkPath.delete();
-              linkPath.createSymbolicLink(symlink.targetPath());
+              plantSymlinkAt(linkPath, symlink.targetPath());
               return Completable.complete();
             }),
         forceRefetch(linkPath));
+  }
+
+  /**
+   * Creates a symlink at the given path with the given target, replacing whatever is there.
+   *
+   * <p>Planting is idempotent: a symlink that already has the desired target is left untouched.
+   * This matters for symlinks shared by concurrently running local actions, e.g. in a source
+   * directory of an external repo served from the remote repo contents cache, which may be planted
+   * again while another action reads through them. For the same reason, an existing symlink or
+   * regular file is replaced atomically by renaming a freshly created symlink over it, so that the
+   * path exists at every point in time.
+   */
+  private void plantSymlinkAt(Path linkPath, PathFragment targetPath) throws IOException {
+    FileStatus stat = linkPath.statIfFound(Symlinks.NOFOLLOW);
+    if (stat == null) {
+      linkPath.createSymbolicLink(targetPath);
+      return;
+    }
+    if (stat.isSymbolicLink()) {
+      if (linkPath.readSymbolicLink().equals(targetPath)) {
+        return;
+      }
+    } else if (!stat.isFile()) {
+      // The path is a directory. This is the case for tree artifacts, whose root directory is
+      // created before the action runs. A rename over a directory would fail, so delete it first.
+      linkPath.delete();
+      linkPath.createSymbolicLink(targetPath);
+      return;
+    }
+    // The path is a symlink with a different target or a regular file. Replace it atomically.
+    Path tempPath = tempPathGenerator.generateTempPath().forHostFileSystem();
+    try {
+      checkNotNull(tempPath.getParentDirectory()).createDirectoryAndParents();
+      tempPath.createSymbolicLink(targetPath);
+      tempPath.renameTo(linkPath);
+    } catch (IOException e) {
+      // Not all file systems support renaming over an existing file, e.g. on Windows. Fall back to
+      // a non-atomic replacement.
+      deletePartialDownload(tempPath);
+      linkPath.delete();
+      linkPath.createSymbolicLink(targetPath);
+    }
   }
 
   /**
