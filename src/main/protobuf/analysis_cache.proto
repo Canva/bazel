@@ -19,6 +19,23 @@ service AnalysisCache {
   // Stores entries. Writing a key that already exists is a no-op, because the key is a fingerprint
   // of the value and an upload re-sends entries other builds have already contributed.
   rpc Put(PutRequest) returns (PutResponse);
+
+  // Fetches entries together with everything they reference, over one stream per build.
+  //
+  // A reader learns which nested values an entry needs only by deserializing it, so with Get
+  // every level of nesting is another request and another round trip, and a large build keeps
+  // hundreds of thousands of reads in flight. An entry written with `references` lets the service
+  // walk the graph instead. With `expand` set it answers each requested key with the entry and
+  // then every entry reachable from it, and the reader finds most of its next reads delivered.
+  //
+  // The service keeps, per stream, the set of entries it has sent. An entry is pushed at most
+  // once per stream however many requested keys reach it, which is what makes this cheaper than
+  // expanding each request on its own: the closures of a build's top-level keys overlap almost
+  // entirely. Requests are answered in order.
+  //
+  // Expansion is a prefetch, never an answer. A reference the writer did not record, or one whose
+  // target is absent, only means the reader asks for that key itself later.
+  rpc Fetch(stream FetchRequest) returns (stream FetchResponse);
 }
 
 // The tenant a request is served under is resolved by the service from the caller's credentials.
@@ -52,4 +69,35 @@ message Entry {
   // removes and the other does not; the client owns that distinction, because a nested shared value
   // has no header and a server stripping unconditionally would eat its first bytes.
   bytes value = 2;
+
+  // The keys of the entries this one cannot be read without, as the writer knows them: each key
+  // preceded by its length in one byte. Set on Put only; never returned. Opaque to the service
+  // beyond that framing, and advisory: see Fetch.
+  bytes references = 3;
+}
+
+message FetchRequest {
+  // Each key is answered exactly once: with its entry, in `missing`, or in `already_sent`.
+  repeated bytes keys = 1;
+
+  // Also send every entry reachable from `keys` that this stream has not sent yet.
+  bool expand = 2;
+
+  // Send the entries of `keys` even if the stream has sent them before.
+  bool force = 3;
+}
+
+message FetchResponse {
+  // Requested and pushed entries alike, without their references.
+  repeated Entry entries = 1;
+
+  // Requested keys the service has no entry for.
+  repeated bytes missing = 2;
+
+  // Requested keys whose entries this stream sent earlier, pushed because an earlier request
+  // referenced them, and so did not send again. Responses are ordered, so a reader that has seen
+  // this has already received the entry: if it no longer holds it, it asks again with `force`.
+  // Telling the reader, rather than staying silent, is what lets it keep nothing about the
+  // entries it has consumed.
+  repeated bytes already_sent = 3;
 }

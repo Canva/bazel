@@ -15,6 +15,8 @@ package com.google.devtools.build.lib.skycache;
 
 import build.aspect.skycache.v1.AnalysisCacheGrpc;
 import build.aspect.skycache.v1.Entry;
+import build.aspect.skycache.v1.FetchRequest;
+import build.aspect.skycache.v1.FetchResponse;
 import build.aspect.skycache.v1.GetRequest;
 import build.aspect.skycache.v1.GetResponse;
 import build.aspect.skycache.v1.PutRequest;
@@ -23,6 +25,10 @@ import com.google.protobuf.ByteString;
 import io.grpc.Server;
 import io.grpc.netty.NettyServerBuilder;
 import io.grpc.stub.StreamObserver;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -40,6 +46,12 @@ import java.util.concurrent.atomic.AtomicLong;
 public final class DevAnalysisCacheServer extends AnalysisCacheGrpc.AnalysisCacheImplBase {
 
   private final ConcurrentHashMap<ByteString, ByteString> entries = new ConcurrentHashMap<>();
+
+  /** By key, the keys its entry was written as referencing. */
+  private final ConcurrentHashMap<ByteString, List<ByteString>> references =
+      new ConcurrentHashMap<>();
+
+  private final AtomicLong entriesPushed = new AtomicLong();
   private final AtomicLong keysRequested = new AtomicLong();
   private final AtomicLong keysHit = new AtomicLong();
   private final AtomicLong entriesOffered = new AtomicLong();
@@ -67,10 +79,86 @@ public final class DevAnalysisCacheServer extends AnalysisCacheGrpc.AnalysisCach
       entriesOffered.incrementAndGet();
       if (entries.putIfAbsent(entry.getKey(), entry.getValue()) == null) {
         stored++;
+        if (!entry.getReferences().isEmpty()) {
+          references.put(entry.getKey(), unpack(entry.getReferences()));
+        }
       }
     }
     responseObserver.onNext(PutResponse.newBuilder().setStored(stored).build());
     responseObserver.onCompleted();
+  }
+
+  /** Splits references packed as each key preceded by its length in one byte. */
+  private static List<ByteString> unpack(ByteString packed) {
+    var keys = new ArrayList<ByteString>();
+    for (int i = 0; i < packed.size(); ) {
+      int length = packed.byteAt(i) & 0xff;
+      keys.add(packed.substring(i + 1, i + 1 + length));
+      i += 1 + length;
+    }
+    return keys;
+  }
+
+  /**
+   * Answers each request with the entries of its keys and, if asked to expand, everything
+   * reachable from them, sending no entry twice on a stream unless forced to.
+   */
+  @Override
+  public StreamObserver<FetchRequest> fetch(StreamObserver<FetchResponse> responseObserver) {
+    var sent = new HashSet<ByteString>();
+    return new StreamObserver<>() {
+      @Override
+      public synchronized void onNext(FetchRequest request) {
+        var response = FetchResponse.newBuilder();
+        var frontier = new ArrayDeque<ByteString>();
+        for (ByteString key : request.getKeysList()) {
+          keysRequested.incrementAndGet();
+          if (!entries.containsKey(key)) {
+            response.addMissing(key);
+          } else if (!sent.add(key) && !request.getForce()) {
+            response.addAlreadySent(key);
+          } else {
+            keysHit.incrementAndGet();
+            frontier.add(key);
+          }
+        }
+        int requested = frontier.size();
+        int answered = 0;
+        while (!frontier.isEmpty()) {
+          ByteString key = frontier.remove();
+          response.addEntries(Entry.newBuilder().setKey(key).setValue(entries.get(key)));
+          answered++;
+          if (!request.getExpand()) {
+            continue;
+          }
+          for (ByteString child : references.getOrDefault(key, List.of())) {
+            if (entries.containsKey(child) && sent.add(child)) {
+              frontier.add(child);
+            }
+          }
+        }
+        entriesPushed.addAndGet(answered - requested);
+        responseObserver.onNext(response.build());
+      }
+
+      @Override
+      public void onError(Throwable t) {}
+
+      @Override
+      public void onCompleted() {
+        responseObserver.onCompleted();
+      }
+    };
+  }
+
+  /** Entries sent because a requested entry referenced them. */
+  long entriesPushed() {
+    return entriesPushed.get();
+  }
+
+  /** Keys asked for, over Get and Fetch alike. */
+  long keysRequested() {
+    return keysRequested.get();
   }
 
   boolean has(ByteString key) {

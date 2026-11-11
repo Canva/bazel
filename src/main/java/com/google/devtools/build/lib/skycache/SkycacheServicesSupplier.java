@@ -20,6 +20,7 @@ import static java.util.stream.Collectors.joining;
 
 import build.aspect.skycache.v1.AnalysisCacheGrpc;
 import build.aspect.skycache.v1.AnalysisCacheGrpc.AnalysisCacheFutureStub;
+import build.aspect.skycache.v1.AnalysisCacheGrpc.AnalysisCacheStub;
 import com.canva.skycache.v1.SnapshotIndexGrpc;
 import com.canva.skycache.v1.SnapshotIndexGrpc.SnapshotIndexFutureStub;
 import com.google.auth.Credentials;
@@ -114,7 +115,10 @@ final class SkycacheServicesSupplier implements RemoteAnalysisCachingServicesSup
   private ImmutableList<MirroredFingerprintValueStore.Mirror> mirrors = ImmutableList.of();
   private final List<ManagedChannel> mirrorChannels = new ArrayList<>();
   @Nullable private LocalAnalysisStore local;
-  @Nullable private BatchingGetQueue gets;
+  @Nullable private ReadQueue gets;
+  @Nullable private StreamingFetchQueue streaming;
+  @Nullable private String fetchSummaryAtReset;
+  @Nullable private String referenceSummaryAtReset;
   @Nullable private ScheduledExecutorService scheduler;
   private long shedAtReset;
 
@@ -207,6 +211,7 @@ final class SkycacheServicesSupplier implements RemoteAnalysisCachingServicesSup
     }
 
     SkycacheMirrorOptions mirrorOptions = optionsProvider.getOptions(SkycacheMirrorOptions.class);
+    SkycacheFetchOptions fetchOptions = optionsProvider.getOptions(SkycacheFetchOptions.class);
     SnapshotIndex remoteIndex =
         target.isEmpty()
             ? null
@@ -214,7 +219,8 @@ final class SkycacheServicesSupplier implements RemoteAnalysisCachingServicesSup
                 target,
                 cachingOptions,
                 servicesOptions,
-                mirrorOptions == null ? ImmutableList.of() : mirrorOptions.getMirrors());
+                mirrorOptions == null ? ImmutableList.of() : mirrorOptions.getMirrors(),
+                fetchOptions == null || fetchOptions.getFetchClosures());
     if (!localPath.isEmpty()) {
       try {
         local = LocalAnalysisStore.open(Path.of(localPath), localOptions.getLocalMaxSize());
@@ -252,7 +258,8 @@ final class SkycacheServicesSupplier implements RemoteAnalysisCachingServicesSup
       String target,
       RemoteAnalysisCachingOptions cachingOptions,
       RemoteAnalysisCachingServicesOptions servicesOptions,
-      List<String> mirrorTargets)
+      List<String> mirrorTargets,
+      boolean fetchClosures)
       throws SerializedAbruptExitException {
     if (authAndTlsOptions == null) {
       throw abruptExit(
@@ -279,7 +286,7 @@ final class SkycacheServicesSupplier implements RemoteAnalysisCachingServicesSup
     // One read queue for both readers. A response is the stored bytes whoever asked for them — the
     // cache client strips the invalidation header on its own side — so the two can share batches,
     // and sharing is what makes those batches full.
-    gets =
+    BatchingGetQueue batches =
         new BatchingGetQueue(
             stub,
             servicesOptions.getReaderMaxBatchSize(),
@@ -287,6 +294,20 @@ final class SkycacheServicesSupplier implements RemoteAnalysisCachingServicesSup
             servicesOptions.getMaxInFlightReadRequests(),
             deadlineMillis,
             scheduler);
+    if (fetchClosures) {
+      AnalysisCacheStub streamStub = AnalysisCacheGrpc.newStub(channel);
+      if (callCredentials != null) {
+        streamStub = streamStub.withCallCredentials(callCredentials);
+      }
+      // No deadline: the stream lives as long as the command. Requests are written on the
+      // scheduler's one thread, which the batches use only for their linger timers.
+      streaming =
+          new StreamingFetchQueue(
+              streamStub, batches, servicesOptions.getReaderMaxBatchSize(), scheduler, commonPool());
+      gets = streaming;
+    } else {
+      gets = batches;
+    }
 
     grpcStore =
         new GrpcFingerprintValueStore(
@@ -426,6 +447,42 @@ final class SkycacheServicesSupplier implements RemoteAnalysisCachingServicesSup
     return failure;
   }
 
+  /**
+   * Returns how the last command's reads were served, once, or null if none went over a stream.
+   *
+   * <p>Survives {@link #resetCommandState}, which is where the stream is ended.
+   */
+  @Nullable
+  String takeFetchSummary() {
+    String summary = streaming == null ? fetchSummaryAtReset : summarize(streaming);
+    fetchSummaryAtReset = null;
+    return summary;
+  }
+
+  /** Returns how many bytes of references the last command's upload carried, once, or null. */
+  @Nullable
+  String takeReferenceSummary() {
+    String summary = referenceSummaryAtReset;
+    referenceSummaryAtReset = null;
+    return summary;
+  }
+
+  @Nullable
+  private static String summarize(StreamingFetchQueue streaming) {
+    long received = streaming.entriesReceived();
+    if (received == 0 && streaming.keysRequested() == 0) {
+      return null;
+    }
+    return String.format(
+        "Analysis cache: received %d entries for %d keys asked for in %d requests; %d reads"
+            + " were already delivered, %d were asked for twice",
+        received,
+        streaming.keysRequested(),
+        streaming.batchesSent(),
+        streaming.servedFromBuffer(),
+        streaming.forced());
+  }
+
   @Nullable
   private static String summarize(ValidatingAnalysisCacheClient client) {
     var stats = client.getValidationStats();
@@ -484,11 +541,25 @@ final class SkycacheServicesSupplier implements RemoteAnalysisCachingServicesSup
     // channel does or the build reports a successful upload it never sent.
     if (grpcStore != null) {
       grpcStore.flush();
+      long referenceBytes = grpcStore.referenceBytesSent();
+      if (referenceBytes > 0) {
+        referenceSummaryAtReset =
+            String.format(
+                "Analysis cache: sent %d bytes of references with the upload", referenceBytes);
+      }
     }
     for (MirroredFingerprintValueStore.Mirror mirror : mirrors) {
       mirror.flush();
     }
     shedAtReset = gets == null ? 0 : gets.shed();
+    if (streaming != null) {
+      fetchSummaryAtReset = summarize(streaming);
+      streaming = null;
+    }
+    if (gets != null) {
+      // Before the scheduler stops, which is where the stream is ended.
+      gets.close();
+    }
     if (local != null) {
       // Indexes this command's writes, after which other servers can read them.
       try {

@@ -39,7 +39,7 @@ import javax.annotation.Nullable;
  * Bundles the components needed to store serialized values by fingerprint, the storage interface,
  * the cache and the hash function for computing fingerprints.
  */
-public final class FingerprintValueService implements KeyValueWriter {
+public final class FingerprintValueService implements KeyValueWriter, ReferencingWriter {
 
   /** A {@link Fingerprinter} implementation for non-production use. */
   public static final Fingerprinter NONPROD_FINGERPRINTER =
@@ -171,8 +171,21 @@ public final class FingerprintValueService implements KeyValueWriter {
   /** Delegates to {@link FingerprintValueStore#put}. */
   @Override
   public WriteStatus put(KeyBytesProvider fingerprint, byte[] serializedBytes) {
+    return put(fingerprint, serializedBytes, /* references= */ null);
+  }
+
+  /**
+   * Delegates to the store, with {@code references} if it is a {@link ReferencingWriter} and
+   * without them otherwise.
+   */
+  @Override
+  public WriteStatus put(
+      KeyBytesProvider fingerprint, byte[] serializedBytes, @Nullable byte[] references) {
     Instant before = Instant.now();
-    WriteStatus status = store.put(fingerprint, serializedBytes);
+    WriteStatus status =
+        references != null && store instanceof ReferencingWriter referencing
+            ? referencing.put(fingerprint, serializedBytes, references)
+            : store.put(fingerprint, serializedBytes);
     status.addListener(
         () ->
             setLatencyMicros.add(

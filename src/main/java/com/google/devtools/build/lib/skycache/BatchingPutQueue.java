@@ -25,6 +25,7 @@ import java.util.List;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
+import javax.annotation.Nullable;
 
 /**
  * Coalesces single-entry writes into batched Put RPCs.
@@ -69,12 +70,25 @@ final class BatchingPutQueue {
 
   /** Enqueues an entry, returning a future that completes when its batch has been acknowledged. */
   SettableWriteStatus enqueue(byte[] key, byte[] value) {
+    return enqueue(key, value, /* references= */ null);
+  }
+
+  /**
+   * As {@link #enqueue(byte[], byte[])}, telling the service which entries a reader of this one
+   * reads next, so it can send them without being asked.
+   *
+   * @param references each referenced key preceded by its length in one byte, or null
+   */
+  SettableWriteStatus enqueue(byte[] key, byte[] value, @Nullable byte[] references) {
     SettableWriteStatus done = new SettableWriteStatus();
-    Entry entry =
+    Entry.Builder builder =
         Entry.newBuilder()
             .setKey(com.google.protobuf.ByteString.copyFrom(key))
-            .setValue(com.google.protobuf.ByteString.copyFrom(value))
-            .build();
+            .setValue(com.google.protobuf.ByteString.copyFrom(value));
+    if (references != null) {
+      builder.setReferences(com.google.protobuf.ByteString.copyFrom(references));
+    }
+    Entry entry = builder.build();
 
     List<PendingPut> toSend = null;
     boolean scheduleLinger = false;

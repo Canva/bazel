@@ -236,6 +236,7 @@ java_library(
         "//src/test/java/com/google/devtools/build/lib/skyframe/serialization/analysis:__pkg__",
     ],
     deps = [
+        "//src/main/java/com/google/devtools/build/lib/skyframe/serialization:fingerprint_value_store",
         ":file_dependency_key_support",
         ":invalidation_data_reference_or_future",
         ":invalidation_type",

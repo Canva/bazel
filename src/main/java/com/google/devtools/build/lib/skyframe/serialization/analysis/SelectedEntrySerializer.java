@@ -55,6 +55,7 @@ import com.google.devtools.build.lib.skyframe.serialization.FrontierNodeVersion;
 import com.google.devtools.build.lib.skyframe.serialization.KeyValueWriter;
 import com.google.devtools.build.lib.skyframe.serialization.ObjectCodecs;
 import com.google.devtools.build.lib.skyframe.serialization.PackedFingerprint;
+import com.google.devtools.build.lib.skyframe.serialization.References;
 import com.google.devtools.build.lib.skyframe.serialization.ProfileCollector;
 import com.google.devtools.build.lib.skyframe.serialization.SerializationResult;
 import com.google.devtools.build.lib.skyframe.serialization.SharedValueSerializationContext;
@@ -701,6 +702,13 @@ final class SelectedEntrySerializer {
               fingerprintValueService.fingerprint(
                   frontierVersion.concat(keyResult.getObject().toByteArray()));
           byte[] entryBytes = bytesOut.toByteArray();
+          // What a reader of the entry reads next: the invalidation data it is checked against,
+          // then the shared values its value refers to.
+          byte[] entryReferences =
+              new References()
+                  .add(node.cacheKey())
+                  .addAll(valueResult.getReferences())
+                  .pack();
 
           // Put this in a separate variable so that we don't close over potentially large byte
           // arrays
@@ -731,7 +739,8 @@ final class SelectedEntrySerializer {
                   new FutureCallback<Void>() {
                     @Override
                     public void onSuccess(Void unused) {
-                      uploadEntryBytes(versionedKey, entryBytes, keyByteCount, valueByteCount);
+                      uploadEntryBytes(
+                          versionedKey, entryBytes, entryReferences, keyByteCount, valueByteCount);
                     }
 
                     @Override
@@ -752,9 +761,14 @@ final class SelectedEntrySerializer {
     }
 
     private void uploadEntryBytes(
-        PackedFingerprint versionedKey, byte[] entryBytes, long keyByteCount, long valueByteCount) {
+        PackedFingerprint versionedKey,
+        byte[] entryBytes,
+        byte[] entryReferences,
+        long keyByteCount,
+        long valueByteCount) {
       try {
-        WriteStatus putStatus = fingerprintValueService.put(versionedKey, entryBytes);
+        WriteStatus putStatus =
+            fingerprintValueService.put(versionedKey, entryBytes, entryReferences);
         valueResultTask.registerWriteStatus(putStatus);
 
         putStatus.addListener(

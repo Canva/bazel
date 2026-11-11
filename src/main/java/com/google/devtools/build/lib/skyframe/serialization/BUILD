@@ -122,6 +122,7 @@ java_library(
             "SkycacheMetadataParams.java",
             "SkyValueRetriever.java",
             "PlatformConfigurationProvider.java",
+            "ReferencingWriter.java",
             "VisibleForSerialization.java",
             "WriteStatus.java",
             "WriteStatuses.java",
@@ -296,7 +297,10 @@ java_library(
 
 java_library(
     name = "fingerprint_value_store",
-    srcs = ["FingerprintValueStore.java"],
+    srcs = [
+        "FingerprintValueStore.java",
+        "ReferencingWriter.java",
+    ],
     deps = [
         ":key_bytes_provider",
         ":write_status",

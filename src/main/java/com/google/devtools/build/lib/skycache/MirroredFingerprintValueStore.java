@@ -20,6 +20,7 @@ import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.devtools.build.lib.skyframe.serialization.FingerprintValueStore;
 import com.google.devtools.build.lib.skyframe.serialization.KeyBytesProvider;
+import com.google.devtools.build.lib.skyframe.serialization.ReferencingWriter;
 import com.google.devtools.build.lib.skyframe.serialization.WriteStatus;
 import com.google.devtools.build.lib.skyframe.serialization.WriteStatuses;
 import com.google.devtools.build.lib.skyframe.serialization.WriteStatuses.SettableWriteStatus;
@@ -38,7 +39,7 @@ import javax.annotation.Nullable;
  * other mirrors are as good as ever. It is counted instead, and {@link SnapshotIndex#mirrored}
  * records no snapshot in a mirror that lost a write.
  */
-final class MirroredFingerprintValueStore implements FingerprintValueStore {
+final class MirroredFingerprintValueStore implements FingerprintValueStore, ReferencingWriter {
 
   /** One other service, written through its own channel and batching. */
   static final class Mirror {
@@ -77,9 +78,9 @@ final class MirroredFingerprintValueStore implements FingerprintValueStore {
           : String.format("%d writes failed, the first with %s", failed, first.getMessage());
     }
 
-    private WriteStatus put(byte[] key, byte[] value) {
+    private WriteStatus put(byte[] key, byte[] value, @Nullable byte[] references) {
       SettableWriteStatus done = new SettableWriteStatus();
-      WriteStatus sent = puts.enqueue(key, value);
+      WriteStatus sent = puts.enqueue(key, value, references);
       sent.addListener(
           () -> {
             try {
@@ -105,11 +106,20 @@ final class MirroredFingerprintValueStore implements FingerprintValueStore {
 
   @Override
   public WriteStatus put(KeyBytesProvider fingerprint, byte[] serializedBytes) {
+    return put(fingerprint, serializedBytes, /* references= */ null);
+  }
+
+  @Override
+  public WriteStatus put(
+      KeyBytesProvider fingerprint, byte[] serializedBytes, @Nullable byte[] references) {
     var statuses = new ArrayList<WriteStatus>(mirrors.size() + 1);
-    statuses.add(primary.put(fingerprint, serializedBytes));
+    statuses.add(
+        references != null && primary instanceof ReferencingWriter referencing
+            ? referencing.put(fingerprint, serializedBytes, references)
+            : primary.put(fingerprint, serializedBytes));
     byte[] key = fingerprint.toBytes();
     for (Mirror mirror : mirrors) {
-      statuses.add(mirror.put(key, serializedBytes));
+      statuses.add(mirror.put(key, serializedBytes, references));
     }
     return WriteStatuses.aggregateWriteStatuses(statuses);
   }

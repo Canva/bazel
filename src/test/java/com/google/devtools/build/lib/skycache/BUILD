@@ -99,6 +99,29 @@ java_test(
 )
 
 java_test(
+    name = "StreamingFetchQueueTest",
+    srcs = [
+        "DevAnalysisCacheServer.java",
+        "DevSnapshotIndex.java",
+        "StreamingFetchQueueTest.java",
+    ],
+    deps = [
+        "//src/main/java/com/google/devtools/build/lib/skycache",
+        "//src/main/java/com/google/devtools/build/lib/skyframe/serialization",
+        "//src/main/protobuf:analysis_cache_java_grpc",
+        "//src/main/protobuf:analysis_cache_java_proto",
+        "//src/main/protobuf:snapshot_index_java_grpc",
+        "//src/main/protobuf:snapshot_index_java_proto",
+        "//third_party:guava",
+        "//third_party:junit4",
+        "//third_party:netty",
+        "//third_party:truth",
+        "//third_party/grpc-java:grpc-jar",
+        "@com_google_protobuf//:protobuf_java",
+    ],
+)
+
+java_test(
     name = "MirroredFingerprintValueStoreTest",
     srcs = [
         "DevAnalysisCacheServer.java",

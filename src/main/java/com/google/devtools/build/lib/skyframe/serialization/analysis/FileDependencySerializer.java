@@ -66,6 +66,8 @@ import com.google.devtools.build.lib.skyframe.serialization.EntryPart;
 import com.google.devtools.build.lib.skyframe.serialization.KeyBytesProvider;
 import com.google.devtools.build.lib.skyframe.serialization.KeyValueWriter;
 import com.google.devtools.build.lib.skyframe.serialization.PackedFingerprint;
+import com.google.devtools.build.lib.skyframe.serialization.References;
+import com.google.devtools.build.lib.skyframe.serialization.ReferencingWriter;
 import com.google.devtools.build.lib.skyframe.serialization.ProfileCollector;
 import com.google.devtools.build.lib.skyframe.serialization.ProfileRecorder;
 import com.google.devtools.build.lib.skyframe.serialization.StringKey;
@@ -94,6 +96,7 @@ import com.google.devtools.build.lib.vfs.Root;
 import com.google.devtools.build.lib.vfs.RootedPath;
 import com.google.devtools.build.skyframe.InMemoryGraph;
 import com.google.devtools.build.skyframe.InMemoryNodeEntry;
+import com.google.errorprone.annotations.CanIgnoreReturnValue;
 import com.google.errorprone.annotations.DoNotCall;
 import com.google.protobuf.CodedOutputStream;
 import java.io.ByteArrayOutputStream;
@@ -586,6 +589,10 @@ public final class FileDependencySerializer {
 
     private final FileInvalidationData.Builder data = FileInvalidationData.newBuilder();
     private final ArrayList<WriteStatus> writeStatuses = new ArrayList<>();
+
+    /** The parent entries a reader resolves this one through, which it reads next. */
+    private final References references = new References(1);
+
     private long mtsv;
 
     private FileInvalidationDataUploader(
@@ -614,7 +621,7 @@ public final class FileDependencySerializer {
       counters.keyBytesWaitingForUpload.addAndGet(keyByteCount);
       counters.valueBytesWaitingForUpload.addAndGet(valueByteCount);
 
-      WriteStatus writeStatus = writer.put(keyBytes, dataBytes);
+      WriteStatus writeStatus = put(keyBytes, dataBytes, references.pack());
       writeStatus.addListener(
           () -> {
             counters.nodesWaitingForUpload.decrementAndGet();
@@ -651,6 +658,7 @@ public final class FileDependencySerializer {
       }
       updateMtsvIfGreater(parentMtsv);
       writeStatuses.add(parent.writeStatus());
+      addReference(references, parent.cacheKey());
     }
 
     /**
@@ -667,6 +675,7 @@ public final class FileDependencySerializer {
     private void addSymlinkParentInfo(FileInvalidationDataInfo parentInfo) {
       updateMtsvIfGreater(parentInfo.mtsv());
       writeStatuses.add(parentInfo.writeStatus());
+      addReference(references, parentInfo.cacheKey());
     }
 
     private void updateMtsvIfGreater(long version) {
@@ -937,6 +946,8 @@ public final class FileDependencySerializer {
     public ListenableFuture<ListingDataInfo> apply(FileDataInfo info) {
       DirectoryListingInvalidationData.Builder data = DirectoryListingInvalidationData.newBuilder();
       var writeStatuses = new ArrayList<WriteStatus>();
+      // The directory's own file entry, which a reader resolves the listing through.
+      var references = new References(1);
       long fileMtsv;
       RootedPath realPath;
       switch (info) {
@@ -946,6 +957,7 @@ public final class FileDependencySerializer {
           fileMtsv = LongVersionGetter.MINIMAL;
         }
         case FileInvalidationDataInfo fileInfo -> {
+          addReference(references, fileInfo.cacheKey());
           writeStatuses.add(fileInfo.writeStatus());
           fileMtsv = fileInfo.mtsv();
           if (fileMtsv != LongVersionGetter.MINIMAL) {
@@ -981,7 +993,7 @@ public final class FileDependencySerializer {
             counters.keyBytesWaitingForUpload.addAndGet(keyByteCount);
             counters.valueBytesWaitingForUpload.addAndGet(valueByteCount);
 
-            WriteStatus writeStatus = writer.put(keyBytes, dataBytes);
+            WriteStatus writeStatus = put(keyBytes, dataBytes, references.pack());
             writeStatus.addListener(
                 () -> {
                   counters.nodesWaitingForUpload.decrementAndGet();
@@ -1150,7 +1162,24 @@ public final class FileDependencySerializer {
       counters.keyBytesWaitingForUpload.addAndGet(keyByteCount);
       counters.valueBytesWaitingForUpload.addAndGet(valueByteCount);
 
-      WriteStatus writeStatus = writer.put(key, maybeCompressedBytes);
+      // Everything the node names: a reader checks each of them.
+      var references =
+          new References(
+              sortedNodeDependencies.size() + sortedFileKeys.size() + sortedListingKeys.size() + 1);
+      for (PackedFingerprint nodeDependency : sortedNodeDependencies) {
+        references.add(nodeDependency);
+      }
+      for (String fileKey : sortedFileKeys) {
+        addReference(references, fileKey);
+      }
+      for (String listingKey : sortedListingKeys) {
+        addReference(references, listingKey);
+      }
+      if (sourceFileKey != null) {
+        addReference(references, sourceFileKey);
+      }
+
+      WriteStatus writeStatus = put(key, maybeCompressedBytes, references.pack());
       writeStatus.addListener(
           () -> {
             counters.nodesWaitingForUpload.decrementAndGet();
@@ -1452,7 +1481,10 @@ public final class FileDependencySerializer {
                 cacheKey,
                 aggregateWriteStatuses(
                     ImmutableList.of(
-                        writer.put(keyBytes, data.build().toByteArray()),
+                        put(
+                            keyBytes,
+                            data.build().toByteArray(),
+                            plainDirectoryReference(workspacePath.getParentDirectory())),
                         writeDirectoryRecords(workspacePath.getParentDirectory()))),
                 value.exists(),
                 mtsv,
@@ -1500,7 +1532,10 @@ public final class FileDependencySerializer {
                 cacheKey,
                 aggregateWriteStatuses(
                     ImmutableList.of(
-                        writer.put(keyBytes, data.build().toByteArray()),
+                        put(
+                            keyBytes,
+                            data.build().toByteArray(),
+                            plainDirectoryReference(workspacePath)),
                         writeDirectoryRecords(workspacePath))),
                 mtsv));
       }
@@ -1527,7 +1562,10 @@ public final class FileDependencySerializer {
               cacheKey,
               aggregateWriteStatuses(
                   ImmutableList.of(
-                      writer.put(keyBytes, data.build().toByteArray()),
+                      put(
+                          keyBytes,
+                          data.build().toByteArray(),
+                          plainDirectoryReference(keyPath.getParentDirectory())),
                       writeDirectoryRecords(keyPath.getParentDirectory()))),
               /* exists= */ true,
               version,
@@ -1555,7 +1593,11 @@ public final class FileDependencySerializer {
               cacheKey,
               aggregateWriteStatuses(
                   ImmutableList.of(
-                      writer.put(keyBytes, data.build().toByteArray()), fileData.writeStatus())),
+                      put(
+                          keyBytes,
+                          data.build().toByteArray(),
+                          addReference(new References(1), fileData.cacheKey()).pack()),
+                      fileData.writeStatus())),
               version);
         });
   }
@@ -1586,8 +1628,51 @@ public final class FileDependencySerializer {
           String cacheKey = computeCacheKey(dir, LongVersionGetter.MINIMAL, FILE_KEY_DELIMITER);
           KeyBytesProvider keyBytes = getKeyBytes(cacheKey, data::setOverflowKey);
           return aggregateWriteStatuses(
-              ImmutableList.of(writer.put(keyBytes, data.build().toByteArray()), parent));
+              ImmutableList.of(
+                  put(
+                      keyBytes,
+                      data.build().toByteArray(),
+                      plainDirectoryReference(dir.getParentDirectory())),
+                  parent));
         });
+  }
+
+  /**
+   * Writes an entry, telling the store which entries a reader of it reads next if the store can
+   * use that.
+   */
+  private WriteStatus put(
+      KeyBytesProvider key, byte[] serializedBytes, @Nullable byte[] references) {
+    return references != null && writer instanceof ReferencingWriter referencing
+        ? referencing.put(key, serializedBytes, references)
+        : writer.put(key, serializedBytes);
+  }
+
+  /**
+   * Adds the key the entry with {@code cacheKey} is stored under, as {@link #getKeyBytes} derives
+   * it, to the entries a reader of another entry reads next.
+   */
+  @CanIgnoreReturnValue
+  private References addReference(References references, String cacheKey) {
+    byte[] key = cacheKey.getBytes(UTF_8);
+    return cacheKey.length() > MAX_KEY_LENGTH
+        ? references.add(writer.fingerprint(key))
+        : references.add(key);
+  }
+
+  /**
+   * Packs a reference to the entry {@link #writeDirectoryRecords} writes for {@code directory}, or
+   * returns null if it writes none.
+   */
+  @Nullable
+  private byte[] plainDirectoryReference(@Nullable PathFragment directory) {
+    if (directory == null || directory.isEmpty()) {
+      return null;
+    }
+    return addReference(
+            new References(1),
+            computeCacheKey(directory, LongVersionGetter.MINIMAL, FILE_KEY_DELIMITER))
+        .pack();
   }
 
   /** The path a repository's synthetic entries are keyed by: {@code external/<name>}. */

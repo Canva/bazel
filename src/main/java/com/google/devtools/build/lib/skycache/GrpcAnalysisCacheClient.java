@@ -45,7 +45,7 @@ final class GrpcAnalysisCacheClient implements RemoteAnalysisCacheClient {
   private static final LookupResult MISS =
       new Lookup(new byte[0], null, MissReason.MISS_REASON_SKYVALUE_MISS.getNumber());
 
-  private final BatchingGetQueue gets;
+  private final ReadQueue gets;
 
   private final AtomicLong bytesSent = new AtomicLong();
   private final AtomicLong bytesReceived = new AtomicLong();
@@ -55,7 +55,7 @@ final class GrpcAnalysisCacheClient implements RemoteAnalysisCacheClient {
   private record Lookup(byte[] value, @Nullable byte[] invalidationFingerprint, int missReason)
       implements LookupResult {}
 
-  GrpcAnalysisCacheClient(BatchingGetQueue gets) {
+  GrpcAnalysisCacheClient(ReadQueue gets) {
     this.gets = gets;
   }
 

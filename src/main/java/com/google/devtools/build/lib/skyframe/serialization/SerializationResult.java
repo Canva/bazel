@@ -30,10 +30,27 @@ import javax.annotation.Nullable;
  */
 public abstract class SerializationResult<T> {
   private final T object;
+  @Nullable private final byte[] references;
 
-  private SerializationResult(T object) {
+  private SerializationResult(T object, @Nullable byte[] references) {
     this.object = object;
+    this.references = references;
   }
+
+  /**
+   * Returns the keys of the shared values {@link #getObject} refers to by fingerprint, packed as
+   * {@link References} packs them, or null if there are none or they were not recorded.
+   *
+   * <p>A hint for {@link ReferencingWriter#put}, set only for results of {@link
+   * ObjectCodecs#serializeMemoizedAsync}.
+   */
+  @Nullable
+  public byte[] getReferences() {
+    return references;
+  }
+
+  /** Returns a new {@link SerializationResult} that differs only in its {@link #getReferences}. */
+  abstract SerializationResult<T> withReferences(@Nullable byte[] references);
 
   /**
    * Returns a new {@link SerializationResult} with the same future (if any) and {@code newObj}
@@ -67,12 +84,21 @@ public abstract class SerializationResult<T> {
 
   private static class ObjectWithoutFuture<T> extends SerializationResult<T> {
     private ObjectWithoutFuture(T obj) {
-      super(obj);
+      this(obj, /* references= */ null);
+    }
+
+    private ObjectWithoutFuture(T obj, @Nullable byte[] references) {
+      super(obj, references);
     }
 
     @Override
     public <S> SerializationResult<S> with(S newObj) {
-      return new ObjectWithoutFuture<>(newObj);
+      return new ObjectWithoutFuture<>(newObj, getReferences());
+    }
+
+    @Override
+    SerializationResult<T> withReferences(@Nullable byte[] references) {
+      return new ObjectWithoutFuture<>(getObject(), references);
     }
 
     @Override
@@ -85,13 +111,23 @@ public abstract class SerializationResult<T> {
     private final ListenableFuture<?> futureToBlockWritesOn;
 
     private ObjectWithFuture(T obj, ListenableFuture<?> futureToBlockWritesOn) {
-      super(obj);
+      this(obj, futureToBlockWritesOn, /* references= */ null);
+    }
+
+    private ObjectWithFuture(
+        T obj, ListenableFuture<?> futureToBlockWritesOn, @Nullable byte[] references) {
+      super(obj, references);
       this.futureToBlockWritesOn = Preconditions.checkNotNull(futureToBlockWritesOn, obj);
     }
 
     @Override
     public <S> SerializationResult<S> with(S newObj) {
-      return new ObjectWithFuture<>(newObj, futureToBlockWritesOn);
+      return new ObjectWithFuture<>(newObj, futureToBlockWritesOn, getReferences());
+    }
+
+    @Override
+    SerializationResult<T> withReferences(@Nullable byte[] references) {
+      return new ObjectWithFuture<>(getObject(), futureToBlockWritesOn, references);
     }
 
     @Override

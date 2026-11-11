@@ -50,7 +50,7 @@ import java.util.concurrent.atomic.AtomicLong;
  * fill while the RPC that would unblock its producers is outstanding. At 4,988 lookups it issued
  * 1.6x to 5x more RPCs than the timer at every injected latency, with no wall-time difference.
  */
-final class BatchingGetQueue {
+final class BatchingGetQueue implements ReadQueue {
 
   private final AnalysisCacheFutureStub stub;
   private final int maxBatchSize;
@@ -91,7 +91,8 @@ final class BatchingGetQueue {
    * @return the stored value, or {@code null} if the service has no entry for the key. Callers
    *     translate absence into whatever their own contract expects.
    */
-  SettableFuture<byte[]> enqueue(byte[] key) {
+  @Override
+  public SettableFuture<byte[]> enqueue(byte[] key) {
     SettableFuture<byte[]> value = SettableFuture.create();
     if (shouldShed()) {
       shed.incrementAndGet();
@@ -191,12 +192,14 @@ final class BatchingGetQueue {
   }
 
   /** Number of RPCs actually issued, as against the number of keys asked for. */
-  long batchesSent() {
+  @Override
+  public long batchesSent() {
     return batchesSent.get();
   }
 
   /** Reads answered as misses because the in-flight cap was reached. */
-  long shed() {
+  @Override
+  public long shed() {
     return shed.get();
   }
 }

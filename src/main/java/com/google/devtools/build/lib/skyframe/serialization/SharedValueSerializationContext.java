@@ -36,6 +36,7 @@ import com.google.protobuf.CodedOutputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.HashSet;
 import java.util.List;
@@ -122,6 +123,20 @@ public abstract class SharedValueSerializationContext extends MemoizingSerializa
    */
   @Nullable // lazily initialized
   private ArrayList<FuturePut> futurePuts;
+
+  /**
+   * Where in the serialized bytes each fingerprint written by {@link #putSharedValue} starts,
+   * placeholders included.
+   *
+   * <p>These are the entries a reader of the bytes fetches next, which {@link #packReferences}
+   * hands to the store with the bytes. Recorded as offsets rather than fingerprints because a
+   * placeholder's fingerprint is not known until its future completes, and by then it is in the
+   * bytes.
+   */
+  @Nullable // lazily initialized
+  private int[] referenceOffsets;
+
+  private int referenceCount;
 
   @VisibleForTesting // private
   static SharedValueSerializationContext createForTesting(
@@ -233,6 +248,7 @@ public abstract class SharedValueSerializationContext extends MemoizingSerializa
         recordFuturePut(inflight, codedOut);
         return;
       }
+      recordReference(codedOut);
       ((PackedFingerprint) previous).writeTo(codedOut);
       return;
     }
@@ -294,6 +310,9 @@ public abstract class SharedValueSerializationContext extends MemoizingSerializa
     // Each entry of the following list corresponds to a `putSharedValue` call made by serialization
     // of `child`. Used to fill-in `childBytes` placeholders.
     ArrayList<FuturePut> childFuturePuts;
+    // Where `childBytes` refers to shared values of its own, for the store's benefit.
+    int[] childReferenceOffsets;
+    int childReferenceCount;
     ProfileRecorder childRecorder;
     { // Serializes `child` with a fresh context, populating the above variables.
       ByteArrayOutputStream childStream = new ByteArrayOutputStream();
@@ -316,6 +335,8 @@ public abstract class SharedValueSerializationContext extends MemoizingSerializa
               ? new ArrayList<>()
               : childContext.futuresToBlockWritingOn;
       childFuturePuts = childContext.futurePuts;
+      childReferenceOffsets = childContext.referenceOffsets;
+      childReferenceCount = childContext.referenceCount;
     }
 
     if (childFuturePuts == null) {
@@ -325,6 +346,12 @@ public abstract class SharedValueSerializationContext extends MemoizingSerializa
       ChunkedValueSerialization.ChunkingResult chunkingResult =
           ChunkedValueSerialization.maybeCompressAndChunk(
               childBytes, compressionService, fingerprintValueService, childWriteStatuses::add);
+      byte[] childReferences =
+          packReferences(
+              childReferenceOffsets,
+              childReferenceCount,
+              childBytes,
+              chunkingResult.serializedBytes());
       childBytes = chunkingResult.serializedBytes();
       int childBytesCount = chunkingResult.bytesToUpload();
       if (childRecorder != null && childBytesCount != uncompressedLength) {
@@ -337,8 +364,10 @@ public abstract class SharedValueSerializationContext extends MemoizingSerializa
 
       PackedFingerprint fingerprint =
           fingerprintValueService.fingerprint(childBytes, codec.getClass().getName());
+      recordReference(codedOut);
       fingerprint.writeTo(codedOut); // Writes only the fingerprint to the stream.
-      WriteStatus writeStatus = fingerprintValueService.put(fingerprint, childBytes);
+      WriteStatus writeStatus =
+          fingerprintValueService.put(fingerprint, childBytes, childReferences);
 
       if (childRecorder != null) {
         childRecorder.registerWriteStatus(writeStatus);
@@ -365,6 +394,8 @@ public abstract class SharedValueSerializationContext extends MemoizingSerializa
             childWriteStatuses,
             childBytes,
             childFuturePuts,
+            childReferenceOffsets,
+            childReferenceCount,
             childRecorder,
             codec.getClass().getName());
 
@@ -415,16 +446,22 @@ public abstract class SharedValueSerializationContext extends MemoizingSerializa
 
     private byte[] childBytes;
     private final WriteStatusBuilder childWriteStatuses;
+    @Nullable private final int[] childReferenceOffsets;
+    private final int childReferenceCount;
 
     private UploadOnceFuturePutsResolve(
         FingerprintValueService fingerprintValueService,
         List<WriteStatus> childWriteStatuses,
         byte[] childBytes,
         Collection<FuturePut> childFuturePuts,
+        @Nullable int[] childReferenceOffsets,
+        int childReferenceCount,
         @Nullable ProfileRecorder childRecorder,
         String codecName) {
       super(fingerprintValueService.getExecutor());
       this.fingerprintValueService = fingerprintValueService;
+      this.childReferenceOffsets = childReferenceOffsets;
+      this.childReferenceCount = childReferenceCount;
       this.childRecorder = childRecorder;
       this.codecName = codecName;
       this.childWriteStatuses = new WriteStatusBuilder().addAll(childWriteStatuses);
@@ -458,7 +495,13 @@ public abstract class SharedValueSerializationContext extends MemoizingSerializa
 
       PackedFingerprint fingerprint =
           fingerprintValueService.fingerprint(maybeCompressedBytes, codecName);
-      WriteStatus writeStatus = fingerprintValueService.put(fingerprint, maybeCompressedBytes);
+      WriteStatus writeStatus =
+          fingerprintValueService.put(
+              fingerprint,
+              maybeCompressedBytes,
+              // Every placeholder has been filled in by now.
+              packReferences(
+                  childReferenceOffsets, childReferenceCount, childBytes, maybeCompressedBytes));
       if (childRecorder != null) {
         childRecorder.registerWriteStatus(writeStatus);
       }
@@ -544,8 +587,45 @@ public abstract class SharedValueSerializationContext extends MemoizingSerializa
       futurePuts = new ArrayList<>();
     }
     futurePuts.add(new FuturePut(codedOut.getTotalBytesWritten(), futurePut));
+    recordReference(codedOut);
     // Adds a placeholder for the real fingerprint to be filled in after the future completes.
     fingerprintValueService.fingerprintPlaceholder().writeTo(codedOut);
+  }
+
+  /** Notes that the next bytes written to {@code codedOut} are a shared value's fingerprint. */
+  private void recordReference(CodedOutputStream codedOut) {
+    if (referenceOffsets == null) {
+      referenceOffsets = new int[4];
+    } else if (referenceCount == referenceOffsets.length) {
+      referenceOffsets = Arrays.copyOf(referenceOffsets, referenceCount * 2);
+    }
+    referenceOffsets[referenceCount++] = codedOut.getTotalBytesWritten();
+  }
+
+  /**
+   * Packs the keys a reader of {@code storedBytes} reads next, for {@link ReferencingWriter#put}.
+   *
+   * @param offsets where in {@code uncompressedBytes} the fingerprints of shared values start
+   * @param uncompressedBytes the serialized value, every placeholder filled in
+   * @param storedBytes what {@link ChunkedValueSerialization#maybeCompressAndChunk} made of it,
+   *     which names chunks of its own if the value was large, or null if it is stored as is
+   * @return null if there is nothing to pack
+   */
+  @Nullable
+  private static byte[] packReferences(
+      @Nullable int[] offsets, int count, byte[] uncompressedBytes, @Nullable byte[] storedBytes) {
+    boolean chunked = storedBytes != null && ChunkedValueSerialization.isChunked(storedBytes);
+    if (count == 0 && !chunked) {
+      return null;
+    }
+    References references = new References(count + (chunked ? 4 : 0));
+    if (chunked) {
+      ChunkedValueSerialization.addChunkReferences(storedBytes, references);
+    }
+    for (int i = 0; i < count; i++) {
+      references.addFingerprintAt(uncompressedBytes, offsets[i]);
+    }
+    return references.pack();
   }
 
   private static final class SerializationTask
@@ -560,6 +640,9 @@ public abstract class SharedValueSerializationContext extends MemoizingSerializa
     private byte[] bytes;
 
     private WriteStatusBuilder childWriteStatuses;
+
+    @Nullable private int[] referenceOffsets;
+    private int referenceCount;
 
     private SerializationTask(SharedValueSerializationContext context, @Nullable Object subject) {
       super(safeDirectExecutor());
@@ -586,6 +669,8 @@ public abstract class SharedValueSerializationContext extends MemoizingSerializa
         }
         ArrayList<FuturePut> futurePuts = context.futurePuts;
         ArrayList<WriteStatus> futuresToBlockWritingOn = context.futuresToBlockWritingOn;
+        referenceOffsets = context.referenceOffsets;
+        referenceCount = context.referenceCount;
 
         if (futurePuts == null && futuresToBlockWritingOn == null) {
           return;
@@ -609,13 +694,18 @@ public abstract class SharedValueSerializationContext extends MemoizingSerializa
     protected SerializationResult<ByteString> getValue() {
       try {
         ByteString result = ByteString.copyFrom(bytes);
+        // Every placeholder has been filled in by now.
+        byte[] references =
+            packReferences(referenceOffsets, referenceCount, bytes, /* storedBytes= */ null);
         if (childWriteStatuses == null) {
-          return SerializationResult.createWithoutFuture(result);
+          return SerializationResult.createWithoutFuture(result).withReferences(references);
         }
-        return SerializationResult.create(result, childWriteStatuses.build());
+        return SerializationResult.create(result, childWriteStatuses.build())
+            .withReferences(references);
       } finally {
         bytes = null;
         childWriteStatuses = null;
+        referenceOffsets = null;
       }
     }
 

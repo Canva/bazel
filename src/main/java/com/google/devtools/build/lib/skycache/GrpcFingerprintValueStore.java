@@ -18,36 +18,53 @@ import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.MoreExecutors;
 import com.google.devtools.build.lib.skyframe.serialization.FingerprintValueStore;
 import com.google.devtools.build.lib.skyframe.serialization.KeyBytesProvider;
+import com.google.devtools.build.lib.skyframe.serialization.ReferencingWriter;
 import com.google.devtools.build.lib.skyframe.serialization.WriteStatus;
 import com.google.devtools.build.lib.util.Bucket;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
+import javax.annotation.Nullable;
 
 /** A {@link FingerprintValueStore} backed by the analysis cache service. */
-final class GrpcFingerprintValueStore implements FingerprintValueStore {
+final class GrpcFingerprintValueStore implements FingerprintValueStore, ReferencingWriter {
 
-  private final BatchingGetQueue gets;
+  private final ReadQueue gets;
   private final BatchingPutQueue puts;
 
   private final AtomicLong valueBytesReceived = new AtomicLong();
   private final AtomicLong valueBytesSent = new AtomicLong();
   private final AtomicLong keyBytesSent = new AtomicLong();
+  private final AtomicLong referenceBytesSent = new AtomicLong();
   private final AtomicLong entriesWritten = new AtomicLong();
   private final AtomicLong entriesFound = new AtomicLong();
   private final AtomicLong entriesNotFound = new AtomicLong();
 
-  GrpcFingerprintValueStore(BatchingGetQueue gets, BatchingPutQueue puts) {
+  GrpcFingerprintValueStore(ReadQueue gets, BatchingPutQueue puts) {
     this.gets = gets;
     this.puts = puts;
   }
 
   @Override
   public WriteStatus put(KeyBytesProvider fingerprint, byte[] serializedBytes) {
+    return put(fingerprint, serializedBytes, /* references= */ null);
+  }
+
+  @Override
+  public WriteStatus put(
+      KeyBytesProvider fingerprint, byte[] serializedBytes, @Nullable byte[] references) {
     byte[] keyBytes = fingerprint.toBytes();
     keyBytesSent.addAndGet(keyBytes.length);
     valueBytesSent.addAndGet(serializedBytes.length);
+    if (references != null) {
+      referenceBytesSent.addAndGet(references.length);
+    }
     entriesWritten.incrementAndGet();
-    return puts.enqueue(keyBytes, serializedBytes);
+    return puts.enqueue(keyBytes, serializedBytes, references);
+  }
+
+  /** Bytes of references sent with entries, which the upload statistics do not otherwise count. */
+  long referenceBytesSent() {
+    return referenceBytesSent.get();
   }
 
   @Override

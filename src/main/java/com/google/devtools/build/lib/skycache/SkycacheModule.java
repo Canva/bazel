@@ -148,6 +148,7 @@ public final class SkycacheModule extends SerializationModule {
         ? ImmutableList.of(
             AuthAndTLSOptions.class,
             RemoteAnalysisCachingServicesOptions.class,
+            SkycacheFetchOptions.class,
             SkycacheGitOptions.class,
             SkycacheLocalOptions.class,
             SkycacheMirrorOptions.class)
@@ -357,6 +358,14 @@ public final class SkycacheModule extends SerializationModule {
     String validation = supplier.takeValidationSummary();
     if (validation != null && eventHandler != null) {
       eventHandler.handle(Event.info(validation));
+    }
+    String fetch = supplier.takeFetchSummary();
+    if (fetch != null && eventHandler != null) {
+      eventHandler.handle(Event.info(fetch));
+    }
+    String references = supplier.takeReferenceSummary();
+    if (references != null && eventHandler != null) {
+      eventHandler.handle(Event.info(references));
     }
     String localFailure = supplier.takeLocalStoreFailure();
     if (localFailure != null && eventHandler != null) {

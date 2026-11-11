@@ -160,6 +160,27 @@ public final class ChunkedValueSerialization {
     return new ChunkingResult(refBlob, /* bytesToUpload= */ compressed.length + refBlob.length);
   }
 
+  /**
+   * Adds the chunks {@code serializedBytes} names to {@code references}, if it is a chunked
+   * reference blob: a reader of the blob reads every one of them next.
+   */
+  static void addChunkReferences(byte[] serializedBytes, References references) {
+    if (!isChunked(serializedBytes)) {
+      return;
+    }
+    CodedInputStream codedIn =
+        CodedInputStream.newInstance(serializedBytes, 1, serializedBytes.length - 1);
+    try {
+      int numChunks = codedIn.readInt32();
+      int offset = 1 + codedIn.getTotalBytesRead();
+      for (int i = 0; i < numChunks; i++) {
+        references.addFingerprintAt(serializedBytes, offset + i * PackedFingerprint.BYTES);
+      }
+    } catch (IOException e) {
+      throw new AssertionError("reading back a reference blob written above", e);
+    }
+  }
+
   /** Returns true if {@code bytes} represents a chunked reference blob. */
   public static boolean isChunked(byte[] bytes) {
     return bytes.length > 0 && bytes[0] == ZSTD_COMPRESSED_AND_CHUNKED;
