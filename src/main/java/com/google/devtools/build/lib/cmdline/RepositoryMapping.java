@@ -16,9 +16,8 @@ package com.google.devtools.build.lib.cmdline;
 
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableMap;
-import com.google.common.collect.Interner;
+import com.google.common.collect.MapMaker;
 import com.google.common.collect.Maps;
-import com.google.devtools.build.lib.concurrent.BlazeInterners;
 import com.google.devtools.build.lib.skyframe.serialization.AsyncDeserializationContext;
 import com.google.devtools.build.lib.skyframe.serialization.DeferredObjectCodec;
 import com.google.devtools.build.lib.skyframe.serialization.SerializationContext;
@@ -30,6 +29,7 @@ import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.concurrent.ConcurrentMap;
 import net.starlark.java.spelling.SpellChecker;
 
 /**
@@ -210,12 +210,14 @@ public class RepositoryMapping {
     private static final RepositoryMappingCodec INSTANCE = new RepositoryMappingCodec();
 
     /**
-     * Mappings for many context repos share one entries map when built locally, the main
-     * repository's tens of thousands of entries among them. Each mapping has its own fingerprint, so
-     * without this every one deserialized would bring its own copy.
+     * The hash codes of entries maps read from the cache, by identity.
+     *
+     * <p>A mapping computes its hash code from its entries' when it is made. For the main
+     * repository's tens of thousands of entries that is not free, and thousands of mappings are
+     * made over the same map.
      */
-    private static final Interner<ImmutableMap<String, RepositoryName>> entriesInterner =
-        BlazeInterners.newWeakInterner();
+    private static final ConcurrentMap<ImmutableMap<String, RepositoryName>, Integer>
+        entriesHashCodes = new MapMaker().weakKeys().makeMap();
 
     @Override
     public boolean autoRegister() {
@@ -233,28 +235,92 @@ public class RepositoryMapping {
         throws SerializationException, IOException {
       codedOut.writeStringNoTag(obj.contextRepo().getName());
       codedOut.writeBoolNoTag(obj.hasCachedInverse());
-      codedOut.writeInt32NoTag(obj.entries().size());
-      for (Map.Entry<String, RepositoryName> entry : obj.entries().entrySet()) {
-        codedOut.writeStringNoTag(entry.getKey());
-        codedOut.writeStringNoTag(entry.getValue().getName());
-      }
+      // Mappings for many context repos are built over one entries map, the main repository's
+      // tens of thousands of entries among them. Written inside each mapping, a build of the
+      // monorepo stored and read that map once per repository: 13% of a reader's CPU. As a shared
+      // value it is written once, by identity, and read once, by fingerprint.
+      context.putSharedValue(
+          obj.entries(), /* distinguisher= */ null, EntriesCodec.INSTANCE, codedOut);
     }
 
     @Override
     public DeferredValue<RepositoryMapping> deserializeDeferred(
         AsyncDeserializationContext context, CodedInputStream codedIn)
         throws SerializationException, IOException {
-      RepositoryName contextRepo = RepositoryName.createUnvalidated(codedIn.readString());
-      boolean cachedInverse = codedIn.readBool();
+      var builder =
+          new Builder(RepositoryName.createUnvalidated(codedIn.readString()), codedIn.readBool());
+      context.getSharedValue(
+          codedIn, /* distinguisher= */ null, EntriesCodec.INSTANCE, builder, Builder::setEntries);
+      return builder;
+    }
+
+    private static final class Builder implements DeferredValue<RepositoryMapping> {
+      private final RepositoryName contextRepo;
+      private final boolean cachedInverse;
+      private ImmutableMap<String, RepositoryName> entries;
+
+      private Builder(RepositoryName contextRepo, boolean cachedInverse) {
+        this.contextRepo = contextRepo;
+        this.cachedInverse = cachedInverse;
+      }
+
+      @Override
+      public RepositoryMapping call() {
+        RepositoryMapping mapping =
+            createWithKnownEntriesHashCode(
+                entries,
+                entriesHashCodes.computeIfAbsent(entries, ImmutableMap::hashCode),
+                contextRepo);
+        return cachedInverse ? mapping.withCachedInverseMap() : mapping;
+      }
+
+      private static void setEntries(Builder builder, Object entries) {
+        @SuppressWarnings("unchecked")
+        var typed = (ImmutableMap<String, RepositoryName>) entries;
+        builder.entries = typed;
+      }
+    }
+  }
+
+  /** Serializes the entries of a mapping, as a value shared by every mapping built over them. */
+  private static final class EntriesCodec
+      extends DeferredObjectCodec<ImmutableMap<String, RepositoryName>> {
+    private static final EntriesCodec INSTANCE = new EntriesCodec();
+
+    @Override
+    public boolean autoRegister() {
+      return false; // Only ever used through RepositoryMappingCodec.
+    }
+
+    @Override
+    @SuppressWarnings("unchecked")
+    public Class<ImmutableMap<String, RepositoryName>> getEncodedClass() {
+      return (Class<ImmutableMap<String, RepositoryName>>) (Class<?>) ImmutableMap.class;
+    }
+
+    @Override
+    public void serialize(
+        SerializationContext context,
+        ImmutableMap<String, RepositoryName> entries,
+        CodedOutputStream codedOut)
+        throws IOException {
+      codedOut.writeInt32NoTag(entries.size());
+      for (Map.Entry<String, RepositoryName> entry : entries.entrySet()) {
+        codedOut.writeStringNoTag(entry.getKey());
+        codedOut.writeStringNoTag(entry.getValue().getName());
+      }
+    }
+
+    @Override
+    public DeferredValue<ImmutableMap<String, RepositoryName>> deserializeDeferred(
+        AsyncDeserializationContext context, CodedInputStream codedIn) throws IOException {
       int size = codedIn.readInt32();
       var entries = ImmutableMap.<String, RepositoryName>builderWithExpectedSize(size);
       for (int i = 0; i < size; i++) {
         entries.put(codedIn.readString(), RepositoryName.createUnvalidated(codedIn.readString()));
       }
-      RepositoryMapping mapping =
-          create(entriesInterner.intern(entries.buildOrThrow()), contextRepo);
-      RepositoryMapping value = cachedInverse ? mapping.withCachedInverseMap() : mapping;
-      return () -> value;
+      ImmutableMap<String, RepositoryName> built = entries.buildOrThrow();
+      return () -> built;
     }
   }
 }
