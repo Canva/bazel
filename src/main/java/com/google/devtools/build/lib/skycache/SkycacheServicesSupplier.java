@@ -234,6 +234,11 @@ final class SkycacheServicesSupplier implements RemoteAnalysisCachingServicesSup
         local == null
             ? remoteStore
             : remoteStore == null ? local : new TieredFingerprintValueStore(local, remoteStore);
+    if (!mode.isUploadEnabled()) {
+      // Around the tiers, not inside them: what a read brings from the service is still kept
+      // locally, since the tiered store writes that to the local one itself.
+      store = new ReadOnlyFingerprintValueStore(store);
+    }
 
     if (base != null && servicesOptions.getAnalysisCacheEnableMetadataQueries()) {
       // Only a git-versioned command has a commit to record or look up, and only a store that
