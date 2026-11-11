@@ -118,6 +118,11 @@ final class StreamingFetchQueue implements ReadQueue {
   private final AtomicLong servedFromBuffer = new AtomicLong();
   private final AtomicLong forced = new AtomicLong();
 
+  /** Bytes delivered and not yet read, and the most that has ever been. */
+  private final AtomicLong bufferedBytes = new AtomicLong();
+
+  private final AtomicLong peakBufferedBytes = new AtomicLong();
+
   /** A read waiting for its entry. Shared by every read of the key while it is awaited. */
   private static final class Waiter {
     private final SettableFuture<byte[]> value = SettableFuture.create();
@@ -164,6 +169,7 @@ final class StreamingFetchQueue implements ReadQueue {
           return current;
         });
     if (found[0] instanceof ByteString bytes) {
+      bufferedBytes.addAndGet(-bytes.size());
       servedFromBuffer.incrementAndGet();
       // Copied out here, on the reader's thread, rather than on the one the stream arrives on.
       return immediateFuture(bytes.toByteArray());
@@ -280,21 +286,33 @@ final class StreamingFetchQueue implements ReadQueue {
       // deserialization, and running that here would let one core's worth of it gate the stream.
       ArrayList<Waiter> waiters = null;
       ArrayList<ByteString> values = null;
+      long delivered = 0;
+      Object[] previous = new Object[1];
       for (Entry entry : response.getEntriesList()) {
         ByteString value = entry.getValue();
-        Object previous = entries.put(mapKey(entry.getKey()), value);
-        if (previous instanceof Waiter waiter) {
-          // Awaited: handed straight over, so nothing stays in the buffer. Removing only this
-          // value keeps a read that arrives in between, and so found the bytes, unaffected.
-          entries.remove(mapKey(entry.getKey()), value);
+        // Awaited: handed straight over below, so it never enters the buffer. Otherwise buffered.
+        entries.compute(
+            mapKey(entry.getKey()),
+            (unused, current) -> {
+              previous[0] = current;
+              return current instanceof Waiter ? null : value;
+            });
+        if (previous[0] instanceof ByteString replaced) {
+          delivered -= replaced.size(); // Sent twice, after a forced request.
+        }
+        if (previous[0] instanceof Waiter waiter) {
           if (waiters == null) {
             waiters = new ArrayList<>();
             values = new ArrayList<>();
           }
           waiters.add(waiter);
           values.add(value);
+        } else {
+          delivered += value.size();
         }
       }
+      long buffered = bufferedBytes.addAndGet(delivered);
+      peakBufferedBytes.accumulateAndGet(buffered, Math::max);
       for (ByteString key : response.getMissingList()) {
         if (entries.remove(mapKey(key)) instanceof Waiter waiter) {
           if (waiters == null) {
@@ -379,6 +397,16 @@ final class StreamingFetchQueue implements ReadQueue {
   /** Entries the service sent, asked for or pushed. */
   long entriesReceived() {
     return entriesReceived.get();
+  }
+
+  /** The most bytes that were ever delivered and waiting to be read. */
+  long peakBufferedBytes() {
+    return peakBufferedBytes.get();
+  }
+
+  /** Bytes delivered and never read: pushed for entries Bazel turned out not to need. */
+  long unreadBytes() {
+    return bufferedBytes.get();
   }
 
   /** Reads that asked a second time for an entry consumed earlier. */

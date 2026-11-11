@@ -475,12 +475,15 @@ final class SkycacheServicesSupplier implements RemoteAnalysisCachingServicesSup
     }
     return String.format(
         "Analysis cache: received %d entries for %d keys asked for in %d requests; %d reads"
-            + " were already delivered, %d were asked for twice",
+            + " were already delivered, %d were asked for twice; at most %d MB waited to be"
+            + " read and %d MB never was",
         received,
         streaming.keysRequested(),
         streaming.batchesSent(),
         streaming.servedFromBuffer(),
-        streaming.forced());
+        streaming.forced(),
+        streaming.peakBufferedBytes() >> 20,
+        streaming.unreadBytes() >> 20);
   }
 
   @Nullable
