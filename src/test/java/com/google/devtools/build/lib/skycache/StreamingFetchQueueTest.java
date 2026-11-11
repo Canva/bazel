@@ -145,6 +145,42 @@ public final class StreamingFetchQueueTest {
   }
 
   @Test
+  public void unexpandedRead_bringsTheEntryAlone_andItsReferencesWhenTheyAreRead()
+      throws Exception {
+    var service = new DevAnalysisCacheServer();
+    ManagedChannel channel = serve(service);
+    byte[] root = fingerprint("root");
+    byte[] invalidation = fingerprint("invalidation");
+    byte[] file = key("a file the root depends on");
+    byte[] value = fingerprint("value");
+    byte[] nested = fingerprint("nested");
+    put(
+        channel,
+        entry(file, "F"),
+        entry(invalidation, "I", file),
+        entry(nested, "N"),
+        entry(value, "V", nested),
+        entry(root, "R", invalidation, value));
+    StreamingFetchQueue queue = queue(channel);
+
+    // A reader that has yet to decide whether it will use the root.
+    assertThat(read(queue.enqueueUnexpanded(root))).isEqualTo("R");
+    assertThat(queue.entriesReceived()).isEqualTo(1);
+
+    // It reads the invalidation data to decide, and that comes whole.
+    assertThat(read(queue.enqueue(invalidation))).isEqualTo("I");
+    assertThat(read(queue.enqueue(file))).isEqualTo("F");
+    assertThat(queue.entriesReceived()).isEqualTo(3);
+    assertThat(service.keysRequested()).isEqualTo(2);
+
+    // Had it rejected the root it would stop here, with nothing of the value sent. It does not.
+    assertThat(read(queue.enqueue(value))).isEqualTo("V");
+    assertThat(read(queue.enqueue(nested))).isEqualTo("N");
+    assertThat(queue.entriesReceived()).isEqualTo(5);
+    assertThat(service.keysRequested()).isEqualTo(3);
+  }
+
+  @Test
   public void absentKey_isAMiss() throws Exception {
     ManagedChannel channel = serve(new DevAnalysisCacheServer());
     StreamingFetchQueue queue = queue(channel);

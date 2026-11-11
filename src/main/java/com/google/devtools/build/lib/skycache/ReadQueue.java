@@ -26,6 +26,15 @@ interface ReadQueue {
    */
   ListenableFuture<byte[]> enqueue(byte[] key);
 
+  /**
+   * Asks for a key without asking for the entries its entry references, for a reader that has yet
+   * to decide whether it will use the entry. The same as {@link #enqueue} for a queue that only
+   * ever reads the keys it is given.
+   */
+  default ListenableFuture<byte[]> enqueueUnexpanded(byte[] key) {
+    return enqueue(key);
+  }
+
   /** Number of requests actually issued, as against the number of keys asked for. */
   long batchesSent();
 

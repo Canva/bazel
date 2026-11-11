@@ -31,6 +31,7 @@ import com.google.devtools.build.lib.skyframe.serialization.Fingerprinter;
 import com.google.devtools.build.lib.skyframe.serialization.FingerprintValueStore;
 import com.google.devtools.build.lib.skyframe.serialization.FingerprintValueStore.MissingFingerprintValueException;
 import com.google.devtools.build.lib.skyframe.serialization.PackedFingerprint;
+import com.google.devtools.build.lib.skyframe.serialization.UnexpandedReader;
 import com.google.devtools.build.lib.skyframe.serialization.analysis.FileDependencyDeserializer.FileDependenciesOrFuture;
 import com.google.devtools.build.lib.skyframe.serialization.analysis.FileDependencyDeserializer.FutureFileDependencies;
 import com.google.devtools.build.lib.skyframe.serialization.analysis.FileDependencyDeserializer.FutureListingDependencies;
@@ -252,7 +253,14 @@ public final class ValidatingAnalysisCacheClient implements RemoteAnalysisCacheC
   private ListenableFuture<LookupResult> lookup(byte[] key, VersionedChangesValidator validator) {
     ListenableFuture<byte[]> valueBytes;
     try {
-      valueBytes = store.get(PackedFingerprint.fromBytes(key));
+      // Alone, where the store would otherwise send what the entry references too: whether the
+      // entry is used is decided below, and its invalidation data and, if it is valid, its value
+      // are asked for as they are read.
+      PackedFingerprint fingerprint = PackedFingerprint.fromBytes(key);
+      valueBytes =
+          store instanceof UnexpandedReader unexpanded
+              ? unexpanded.getUnexpanded(fingerprint)
+              : store.get(fingerprint);
     } catch (IOException e) {
       return immediateFailedFuture(e);
     }

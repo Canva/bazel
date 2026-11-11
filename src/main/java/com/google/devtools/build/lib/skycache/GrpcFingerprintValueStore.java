@@ -19,6 +19,7 @@ import com.google.common.util.concurrent.MoreExecutors;
 import com.google.devtools.build.lib.skyframe.serialization.FingerprintValueStore;
 import com.google.devtools.build.lib.skyframe.serialization.KeyBytesProvider;
 import com.google.devtools.build.lib.skyframe.serialization.ReferencingWriter;
+import com.google.devtools.build.lib.skyframe.serialization.UnexpandedReader;
 import com.google.devtools.build.lib.skyframe.serialization.WriteStatus;
 import com.google.devtools.build.lib.util.Bucket;
 import java.util.List;
@@ -26,7 +27,8 @@ import java.util.concurrent.atomic.AtomicLong;
 import javax.annotation.Nullable;
 
 /** A {@link FingerprintValueStore} backed by the analysis cache service. */
-final class GrpcFingerprintValueStore implements FingerprintValueStore, ReferencingWriter {
+final class GrpcFingerprintValueStore
+    implements FingerprintValueStore, ReferencingWriter, UnexpandedReader {
 
   private final ReadQueue gets;
   private final BatchingPutQueue puts;
@@ -69,8 +71,19 @@ final class GrpcFingerprintValueStore implements FingerprintValueStore, Referenc
 
   @Override
   public ListenableFuture<byte[]> get(KeyBytesProvider fingerprint) {
+    return found(fingerprint, gets.enqueue(fingerprint.toBytes()));
+  }
+
+  @Override
+  public ListenableFuture<byte[]> getUnexpanded(KeyBytesProvider fingerprint) {
+    return found(fingerprint, gets.enqueueUnexpanded(fingerprint.toBytes()));
+  }
+
+  /** Counts what the service answered, and turns its absence into the exception a store owes. */
+  private ListenableFuture<byte[]> found(
+      KeyBytesProvider fingerprint, ListenableFuture<byte[]> read) {
     return Futures.transform(
-        gets.enqueue(fingerprint.toBytes()),
+        read,
         value -> {
           if (value == null) {
             entriesNotFound.incrementAndGet();

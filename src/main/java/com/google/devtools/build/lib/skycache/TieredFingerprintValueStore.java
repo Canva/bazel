@@ -21,6 +21,7 @@ import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.devtools.build.lib.skyframe.serialization.FingerprintValueStore;
 import com.google.devtools.build.lib.skyframe.serialization.KeyBytesProvider;
+import com.google.devtools.build.lib.skyframe.serialization.UnexpandedReader;
 import com.google.devtools.build.lib.skyframe.serialization.WriteStatus;
 import com.google.devtools.build.lib.util.Bucket;
 import java.io.IOException;
@@ -34,7 +35,7 @@ import java.util.List;
  * builds wrote, and shares only with itself: its uploads are of a modified working tree. Keeping
  * service answers locally makes a server restart, or a second worktree, read the disk instead.
  */
-final class TieredFingerprintValueStore implements FingerprintValueStore {
+final class TieredFingerprintValueStore implements FingerprintValueStore, UnexpandedReader {
 
   private final FingerprintValueStore local;
   private final FingerprintValueStore remote;
@@ -51,6 +52,16 @@ final class TieredFingerprintValueStore implements FingerprintValueStore {
 
   @Override
   public ListenableFuture<byte[]> get(KeyBytesProvider fingerprint) throws IOException {
+    return get(fingerprint, /* expanded= */ true);
+  }
+
+  @Override
+  public ListenableFuture<byte[]> getUnexpanded(KeyBytesProvider fingerprint) throws IOException {
+    return get(fingerprint, /* expanded= */ false);
+  }
+
+  private ListenableFuture<byte[]> get(KeyBytesProvider fingerprint, boolean expanded)
+      throws IOException {
     return Futures.catchingAsync(
         local.get(fingerprint),
         Exception.class,
@@ -59,7 +70,9 @@ final class TieredFingerprintValueStore implements FingerprintValueStore {
             throw e;
           }
           return Futures.transform(
-              remote.get(fingerprint),
+              !expanded && remote instanceof UnexpandedReader unexpanded
+                  ? unexpanded.getUnexpanded(fingerprint)
+                  : remote.get(fingerprint),
               value -> {
                 // Same key, same bytes: a content address. A failure only costs the next read.
                 var unused = local.put(fingerprint, value);

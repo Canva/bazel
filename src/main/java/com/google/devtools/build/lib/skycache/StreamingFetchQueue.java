@@ -103,6 +103,10 @@ final class StreamingFetchQueue implements ReadQueue {
   @GuardedBy("lock")
   private ArrayList<ByteString> forcedOutbox = new ArrayList<>();
 
+  /** Keys asked for alone, without what their entries reference. */
+  @GuardedBy("lock")
+  private ArrayList<ByteString> unexpandedOutbox = new ArrayList<>();
+
   @GuardedBy("lock")
   private boolean flushScheduled;
 
@@ -148,6 +152,29 @@ final class StreamingFetchQueue implements ReadQueue {
 
   @Override
   public ListenableFuture<byte[]> enqueue(byte[] keyBytes) {
+    return enqueue(keyBytes, Kind.EXPANDED);
+  }
+
+  /**
+   * Asks for an entry the reader may yet reject, so the service sends it alone.
+   *
+   * <p>What it references is then asked for as it is read, which is when the reader has decided:
+   * each of those reads is expanded, so the closure below the entry still arrives unasked, one
+   * round trip later than it would have.
+   */
+  @Override
+  public ListenableFuture<byte[]> enqueueUnexpanded(byte[] keyBytes) {
+    return enqueue(keyBytes, Kind.UNEXPANDED);
+  }
+
+  /** How a key is asked for. */
+  private enum Kind {
+    EXPANDED,
+    UNEXPANDED,
+    FORCED
+  }
+
+  private ListenableFuture<byte[]> enqueue(byte[] keyBytes, Kind kind) {
     if (unimplemented.get()) {
       return fallback.enqueue(keyBytes);
     }
@@ -176,7 +203,7 @@ final class StreamingFetchQueue implements ReadQueue {
     }
     Waiter waiter = (Waiter) found[0];
     if (created[0]) {
-      send(waiter.key, /* force= */ false);
+      send(waiter.key, kind);
     }
     return waiter.value;
   }
@@ -199,10 +226,15 @@ final class StreamingFetchQueue implements ReadQueue {
    * <p>There is no linger. A request leaves as soon as the sender is free, carrying whatever
    * accumulated while it was busy, so batches grow with load and an idle stream adds no latency.
    */
-  private void send(ByteString key, boolean force) {
+  private void send(ByteString key, Kind kind) {
     boolean schedule;
     synchronized (lock) {
-      (force ? forcedOutbox : outbox).add(key);
+      (switch (kind) {
+            case EXPANDED -> outbox;
+            case UNEXPANDED -> unexpandedOutbox;
+            case FORCED -> forcedOutbox;
+          })
+          .add(key);
       schedule = !flushScheduled;
       flushScheduled = true;
     }
@@ -215,34 +247,40 @@ final class StreamingFetchQueue implements ReadQueue {
   private void flush() {
     ArrayList<ByteString> keys;
     ArrayList<ByteString> forcedKeys;
+    ArrayList<ByteString> unexpandedKeys;
     synchronized (lock) {
       keys = outbox;
       forcedKeys = forcedOutbox;
+      unexpandedKeys = unexpandedOutbox;
       outbox = new ArrayList<>();
       forcedOutbox = new ArrayList<>();
+      unexpandedOutbox = new ArrayList<>();
       flushScheduled = false;
     }
     if (unimplemented.get()) {
       // The stream was refused between these keys being queued and now.
       redirect(keys);
       redirect(forcedKeys);
+      redirect(unexpandedKeys);
       return;
     }
     try {
       if (requests == null) {
         requests = stub.fetch(new Responses());
       }
-      write(keys, /* force= */ false);
-      write(forcedKeys, /* force= */ true);
+      write(unexpandedKeys, Kind.UNEXPANDED);
+      write(keys, Kind.EXPANDED);
+      write(forcedKeys, Kind.FORCED);
     } catch (RuntimeException e) {
       // The observer throws once the call has been cancelled or has failed.
       requests = null;
       failAwaited(keys, e);
       failAwaited(forcedKeys, e);
+      failAwaited(unexpandedKeys, e);
     }
   }
 
-  private void write(List<ByteString> queued, boolean force) {
+  private void write(List<ByteString> queued, Kind kind) {
     // A key queued while the sender was busy may have been pushed since. Asking anyway is
     // harmless, the service only says so, but under load most of the queue is like that.
     ArrayList<ByteString> keys = new ArrayList<>(queued.size());
@@ -254,7 +292,11 @@ final class StreamingFetchQueue implements ReadQueue {
     for (int start = 0; start < keys.size(); start += maxBatchSize) {
       List<ByteString> batch = keys.subList(start, Math.min(keys.size(), start + maxBatchSize));
       requests.onNext(
-          FetchRequest.newBuilder().addAllKeys(batch).setExpand(true).setForce(force).build());
+          FetchRequest.newBuilder()
+              .addAllKeys(batch)
+              .setExpand(kind != Kind.UNEXPANDED)
+              .setForce(kind == Kind.FORCED)
+              .build());
       requestsSent.incrementAndGet();
       keysRequested.addAndGet(batch.size());
     }
@@ -328,7 +370,7 @@ final class StreamingFetchQueue implements ReadQueue {
         // read still waiting therefore missed the entry: it was consumed before the read began.
         if (entries.get(mapKey(key)) instanceof Waiter) {
           forced.incrementAndGet();
-          send(key, /* force= */ true);
+          send(key, Kind.FORCED);
         }
       }
       if (waiters != null) {

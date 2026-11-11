@@ -18,6 +18,7 @@ import static com.google.devtools.build.lib.skyframe.serialization.WriteStatuses
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.devtools.build.lib.skyframe.serialization.FingerprintValueStore;
 import com.google.devtools.build.lib.skyframe.serialization.KeyBytesProvider;
+import com.google.devtools.build.lib.skyframe.serialization.UnexpandedReader;
 import com.google.devtools.build.lib.skyframe.serialization.WriteStatus;
 import java.io.IOException;
 
@@ -31,7 +32,7 @@ import java.io.IOException;
  * locally. Against the service they are also refused, since a reader is not a writer there, and a
  * refused write is reported as a failed upload by a command that uploads nothing.
  */
-final class ReadOnlyFingerprintValueStore implements FingerprintValueStore {
+final class ReadOnlyFingerprintValueStore implements FingerprintValueStore, UnexpandedReader {
 
   private final FingerprintValueStore delegate;
 
@@ -47,6 +48,13 @@ final class ReadOnlyFingerprintValueStore implements FingerprintValueStore {
   @Override
   public ListenableFuture<byte[]> get(KeyBytesProvider fingerprint) throws IOException {
     return delegate.get(fingerprint);
+  }
+
+  @Override
+  public ListenableFuture<byte[]> getUnexpanded(KeyBytesProvider fingerprint) throws IOException {
+    return delegate instanceof UnexpandedReader unexpanded
+        ? unexpanded.getUnexpanded(fingerprint)
+        : delegate.get(fingerprint);
   }
 
   @Override

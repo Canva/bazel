@@ -123,6 +123,7 @@ java_library(
             "SkyValueRetriever.java",
             "PlatformConfigurationProvider.java",
             "ReferencingWriter.java",
+            "UnexpandedReader.java",
             "VisibleForSerialization.java",
             "WriteStatus.java",
             "WriteStatuses.java",
@@ -300,6 +301,7 @@ java_library(
     srcs = [
         "FingerprintValueStore.java",
         "ReferencingWriter.java",
+        "UnexpandedReader.java",
     ],
     deps = [
         ":key_bytes_provider",
