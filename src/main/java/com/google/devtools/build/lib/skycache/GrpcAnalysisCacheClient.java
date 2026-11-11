@@ -63,6 +63,10 @@ final class GrpcAnalysisCacheClient implements RemoteAnalysisCacheClient {
   public ListenableFuture<LookupResult> lookup(byte[] key) {
     requestsSent.incrementAndGet();
     bytesSent.addAndGet(key.length);
+    if (gets.saturated()) {
+      gets.noteShed();
+      return Futures.immediateFuture(MISS);
+    }
     return Futures.transform(
         gets.enqueue(key),
         value -> {

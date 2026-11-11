@@ -421,6 +421,17 @@ final class StreamingFetchQueue implements ReadQueue {
     return requestsSent.get() + fallback.batchesSent();
   }
 
+  /** A stream is never saturated: the service sets its pace. Only the fallback's batches are. */
+  @Override
+  public boolean saturated() {
+    return unimplemented.get() && fallback.saturated();
+  }
+
+  @Override
+  public void noteShed() {
+    fallback.noteShed();
+  }
+
   @Override
   public long shed() {
     return fallback.shed();

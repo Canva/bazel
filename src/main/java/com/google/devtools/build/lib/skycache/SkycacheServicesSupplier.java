@@ -398,6 +398,17 @@ final class SkycacheServicesSupplier implements RemoteAnalysisCachingServicesSup
             validation.validityHorizon(),
             validation.clientChanges());
     validatingClient.setTopLevelTargetsLookup(snapshotIndex);
+    ReadQueue reads = gets;
+    if (reads != null) {
+      validatingClient.setSaturation(
+          () -> {
+            if (!reads.saturated()) {
+              return false;
+            }
+            reads.noteShed();
+            return true;
+          });
+    }
     client = validatingClient;
   }
 

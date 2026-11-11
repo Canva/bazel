@@ -88,17 +88,18 @@ final class BatchingGetQueue implements ReadQueue {
   /**
    * Enqueues a key.
    *
+   * <p>Never declined, however many reads are in flight. This queue used to answer a read over
+   * the cap as a miss, whatever the read was for. On a read of the Canva monorepo that declined
+   * 2,149 reads of invalidation data, each remembered as missing by every entry that shared it,
+   * and 3.1 million entries were rejected for it: the build was slower than with no cache. The
+   * cap is now for the caller of a top-level lookup to apply, through {@link #saturated}.
+   *
    * @return the stored value, or {@code null} if the service has no entry for the key. Callers
    *     translate absence into whatever their own contract expects.
    */
   @Override
   public SettableFuture<byte[]> enqueue(byte[] key) {
     SettableFuture<byte[]> value = SettableFuture.create();
-    if (shouldShed()) {
-      shed.incrementAndGet();
-      value.set(null);
-      return value;
-    }
     List<PendingGet> toSend = null;
     boolean scheduleLinger = false;
     synchronized (lock) {
@@ -141,14 +142,14 @@ final class BatchingGetQueue implements ReadQueue {
     return taken;
   }
 
-  /**
-   * Sheds a read to local evaluation rather than queueing it behind an unbounded backlog.
-   *
-   * <p>Mainline bounds in-flight reads the same way; a null return means "treat as a miss", which
-   * the callers already handle, so load shedding costs an analysis rather than an error.
-   */
-  private boolean shouldShed() {
+  @Override
+  public boolean saturated() {
     return maxInFlight > 0 && inFlight.get() >= maxInFlight;
+  }
+
+  @Override
+  public void noteShed() {
+    shed.incrementAndGet();
   }
 
   private void send(List<PendingGet> batch) {

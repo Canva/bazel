@@ -40,6 +40,7 @@ import com.google.devtools.build.lib.concurrent.safeexecutor.SafeExecutorOwner;
 import com.google.devtools.build.lib.skyframe.serialization.FingerprintValueService;
 import com.google.devtools.build.lib.skyframe.serialization.InMemoryFingerprintValueStore;
 import com.google.devtools.build.lib.skyframe.serialization.PackedFingerprint;
+import com.google.devtools.build.lib.skyframe.serialization.analysis.proto.MissReason;
 import com.google.devtools.build.lib.skyframe.serialization.analysis.FileDependencySerializer.RepositoryBoundary;
 import com.google.devtools.build.lib.skyframe.serialization.analysis.InvalidationDataInfoOrFuture.FileDataInfo;
 import com.google.devtools.build.lib.skyframe.serialization.analysis.InvalidationDataInfoOrFuture.FileDataInfoOrFuture;
@@ -254,6 +255,24 @@ public final class ValidatingAnalysisCacheClientTest {
   }
 
   @Test
+  public void saturatedStore_lookupIsAMissUntilItIsNot() throws Exception {
+    ByteString entry = putEntry(DATA_TYPE_EMPTY, null);
+    var client = client(ImmutableList.of(), ImmutableList.of());
+    var saturated = new java.util.concurrent.atomic.AtomicBoolean(true);
+    client.setSaturation(saturated::get);
+
+    // Declined before anything is read: the target is analysed locally, and nothing that other
+    // entries share is recorded as missing.
+    var declined = client.lookup(entry.toByteArray()).get();
+    assertThat(declined.value()).isEmpty();
+    assertThat(declined.missReason())
+        .isEqualTo(MissReason.MISS_REASON_CACHE_SATURATED.getNumber());
+
+    saturated.set(false);
+    assertThat(lookup(client, entry)).isEqualTo(ByteString.copyFrom(VALUE));
+  }
+
+  @Test
   public void absentEntry_isAMiss() throws Exception {
     var client = client(ImmutableList.of(), ImmutableList.of());
 
@@ -267,7 +286,24 @@ public final class ValidatingAnalysisCacheClientTest {
     // The entry names a dependency whose own record was never written.
     ByteString entry = putEntry(DATA_TYPE_FILE, "nonexistent key");
 
-    assertInvalidated(entry, ImmutableList.of(), ImmutableList.of());
+    // Any change at all, and the entry has to be checked against it, which it cannot be.
+    assertInvalidated(entry, ImmutableList.of(), ImmutableList.of("unrelated/BUILD"));
+    assertInvalidated(
+        entry, ImmutableList.of(new DepotChange("unrelated/BUILD", 101)), ImmutableList.of());
+  }
+
+  @Test
+  public void noChanges_dependencyDataIsNotRead() throws Exception {
+    // A reader whose workspace is exactly what the writer uploaded from has nothing an entry's
+    // dependencies could have changed to, so it does not fetch them, present or not.
+    ByteString dangling = putEntry(DATA_TYPE_FILE, "nonexistent key");
+    ByteString danglingNode =
+        putEntry(DATA_TYPE_ANALYSIS_NODE, PackedFingerprint.getFingerprintForTesting("no node"));
+
+    assertHit(dangling, ImmutableList.of(), ImmutableList.of());
+    assertHit(danglingNode, ImmutableList.of(), ImmutableList.of());
+    // A change the writer had already seen is not a change.
+    assertHit(dangling, ImmutableList.of(new DepotChange("pkg/BUILD", 95)), ImmutableList.of());
   }
 
   @Test

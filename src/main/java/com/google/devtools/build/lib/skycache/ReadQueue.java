@@ -38,7 +38,22 @@ interface ReadQueue {
   /** Number of requests actually issued, as against the number of keys asked for. */
   long batchesSent();
 
-  /** Reads answered as misses because the in-flight cap was reached. */
+  /**
+   * Whether so many reads are in flight that a new top-level lookup should be answered as a miss
+   * instead, by its caller, which then calls {@link #noteShed}.
+   *
+   * <p>Only a top-level lookup can be declined. Its miss costs analysing one target locally. A
+   * nested read cannot: the value or the invalidation data it belongs to is already being read,
+   * and its absence is remembered and fails everything that shares it.
+   */
+  default boolean saturated() {
+    return false;
+  }
+
+  /** Records a top-level lookup declined because the queue was {@link #saturated}. */
+  default void noteShed() {}
+
+  /** Top-level lookups answered as misses because the in-flight cap was reached. */
   long shed();
 
   /** Releases whatever the queue holds for the command that is ending. */

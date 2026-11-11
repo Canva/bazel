@@ -62,6 +62,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
+import java.util.function.BooleanSupplier;
 import javax.annotation.Nullable;
 
 /**
@@ -144,7 +145,20 @@ public final class ValidatingAnalysisCacheClient implements RemoteAnalysisCacheC
   private final FileDependencyDeserializer deserializer;
 
   /** Fails if the changes could not be computed, and then every entry is a miss. */
-  private final ListenableFuture<VersionedChangesValidator> validator;
+  private final ListenableFuture<Checker> checker;
+
+  /**
+   * What entries are checked against.
+   *
+   * @param noChanges whether the reader's workspace is exactly the writer's, so that nothing it
+   *     finds can be invalidated by a change
+   */
+  private record Checker(VersionedChangesValidator validator, boolean noChanges) {
+    private static Checker of(Storage storage, VersionedChanges changes) {
+      return new Checker(
+          new VersionedChangesValidator(storage.executor(), changes), changes.isEmpty());
+    }
+  }
 
   private final int validityHorizon;
 
@@ -160,6 +174,12 @@ public final class ValidatingAnalysisCacheClient implements RemoteAnalysisCacheC
       new ConcurrentHashMap<>();
   private final AtomicReference<String> firstMissingData = new AtomicReference<>();
   @Nullable private volatile TopLevelTargetsLookup topLevelTargetsLookup;
+
+  /** Says whether to decline a lookup because the store has too many reads in flight. */
+  private volatile BooleanSupplier saturation = () -> false;
+
+  private static final LookupResult SATURATED =
+      new LookupResultImpl(new byte[0], MissReason.MISS_REASON_CACHE_SATURATED.getNumber());
 
   /**
    * Creates a client for one command.
@@ -188,9 +208,7 @@ public final class ValidatingAnalysisCacheClient implements RemoteAnalysisCacheC
       }
     }
     return new ValidatingAnalysisCacheClient(
-        storage,
-        immediateFuture(new VersionedChangesValidator(storage.executor(), changes)),
-        validityHorizon);
+        storage, immediateFuture(Checker.of(storage, changes)), validityHorizon);
   }
 
   /**
@@ -215,50 +233,64 @@ public final class ValidatingAnalysisCacheClient implements RemoteAnalysisCacheC
         storage,
         Futures.transform(
             clientChanges,
-            changes ->
-                new VersionedChangesValidator(storage.executor(), new VersionedChanges(changes)),
+            changes -> Checker.of(storage, new VersionedChanges(changes)),
             directExecutor()),
         validityHorizon);
   }
 
   private ValidatingAnalysisCacheClient(
-      Storage storage,
-      ListenableFuture<VersionedChangesValidator> validator,
-      int validityHorizon) {
+      Storage storage, ListenableFuture<Checker> checker, int validityHorizon) {
     this.store = storage.store();
     this.deserializer =
         new FileDependencyDeserializer(
             storage.executor(), storage.compressionService(), storage.fingerprinter());
-    this.validator = validator;
+    this.checker = checker;
     this.validityHorizon = validityHorizon;
+  }
+
+  /**
+   * Has lookups answered as misses while {@code saturation} says the store is saturated.
+   *
+   * <p>Declining here, before anything is read, costs analysing the one target locally. Declining
+   * a read made on a lookup's behalf, of invalidation data or of a nested value, would fail every
+   * entry that shares what was not read.
+   */
+  public void setSaturation(BooleanSupplier saturation) {
+    this.saturation = saturation;
   }
 
   @Override
   public ListenableFuture<LookupResult> lookup(byte[] key) {
+    if (saturation.getAsBoolean()) {
+      absent.incrementAndGet();
+      return immediateFuture(SATURATED);
+    }
     requestsSent.incrementAndGet();
     bytesSent.addAndGet(key.length);
     return Futures.transformAsync(
-        Futures.catching(validator, Exception.class, unused -> null, directExecutor()),
-        validator -> {
-          if (validator == null) {
+        Futures.catching(checker, Exception.class, unused -> null, directExecutor()),
+        checker -> {
+          if (checker == null) {
             invalidated.incrementAndGet();
             countReason("changes unavailable");
             return immediateFuture(INVALIDATED);
           }
-          return lookup(key, validator);
+          return lookup(key, checker);
         },
         directExecutor());
   }
 
-  private ListenableFuture<LookupResult> lookup(byte[] key, VersionedChangesValidator validator) {
+  private ListenableFuture<LookupResult> lookup(byte[] key, Checker checker) {
     ListenableFuture<byte[]> valueBytes;
     try {
-      // Alone, where the store would otherwise send what the entry references too: whether the
-      // entry is used is decided below, and its invalidation data and, if it is valid, its value
-      // are asked for as they are read.
       PackedFingerprint fingerprint = PackedFingerprint.fromBytes(key);
+      // A store that follows references sends what the entry references along with it. That is
+      // wanted if the entry is going to be used, and with no changes to check it against it is.
+      // Otherwise the entry is asked for alone: whether it is used is decided below, and its
+      // invalidation data and, if it is valid, its value are asked for as they are read. That
+      // costs a kept entry two more round trips, and spares a rejected one its whole value.
       valueBytes =
-          store instanceof UnexpandedReader unexpanded
+          !checker.noChanges() && store instanceof UnexpandedReader unexpanded
               ? unexpanded.getUnexpanded(fingerprint)
               : store.get(fingerprint);
     } catch (IOException e) {
@@ -273,7 +305,7 @@ public final class ValidatingAnalysisCacheClient implements RemoteAnalysisCacheC
                     ? Futures.<byte[]>immediateFuture(null)
                     : Futures.<byte[]>immediateFailedFuture(e),
             directExecutor()),
-        value -> validate(value, validator),
+        value -> validate(value, checker),
         directExecutor());
   }
 
@@ -283,8 +315,14 @@ public final class ValidatingAnalysisCacheClient implements RemoteAnalysisCacheC
    * <p>An empty value is how the retriever expects a miss: a failed future is a serialization
    * error.
    */
-  private ListenableFuture<LookupResult> validate(
-      @Nullable byte[] value, VersionedChangesValidator validator) throws IOException {
+  private ListenableFuture<LookupResult> validate(@Nullable byte[] value, Checker checker)
+      throws IOException {
+    VersionedChangesValidator validator = checker.validator();
+    // With no changes there is nothing for a dependency to have changed to: the entry was written
+    // from this workspace's exact contents. Its dependency data is then not read at all, which
+    // for a reader at the commit that was uploaded is most of what it would otherwise fetch
+    // besides the values themselves.
+    boolean noChanges = checker.noChanges();
     if (value == null || value.length == 0) {
       absent.incrementAndGet();
       return immediateFuture(ABSENT);
@@ -304,16 +342,24 @@ public final class ValidatingAnalysisCacheClient implements RemoteAnalysisCacheC
     ListenableFuture<Boolean> valid =
         switch (dataType) {
           case DATA_TYPE_EMPTY -> immediateFuture(true);
-          case DATA_TYPE_FILE ->
-              isUnchanged(
-                  deserializer.getFileDependencies(codedIn.readString(), store), validator);
-          case DATA_TYPE_LISTING ->
-              isUnchanged(
-                  deserializer.getListingDependencies(codedIn.readString(), store), validator);
+          case DATA_TYPE_FILE -> {
+            String fileKey = codedIn.readString();
+            yield noChanges
+                ? immediateFuture(true)
+                : isUnchanged(deserializer.getFileDependencies(fileKey, store), validator);
+          }
+          case DATA_TYPE_LISTING -> {
+            String listingKey = codedIn.readString();
+            yield noChanges
+                ? immediateFuture(true)
+                : isUnchanged(deserializer.getListingDependencies(listingKey, store), validator);
+          }
           case DATA_TYPE_ANALYSIS_NODE -> {
             PackedFingerprint nested = PackedFingerprint.readFrom(codedIn);
             invalidationFingerprint = nested.toBytes();
-            yield isUnchanged(deserializer.getNestedDependencies(nested, store), validator);
+            yield noChanges
+                ? immediateFuture(true)
+                : isUnchanged(deserializer.getNestedDependencies(nested, store), validator);
           }
           case DATA_TYPE_EXECUTION_NODE -> {
             // Analysis only. An execution value's output metadata describes files in the writer's
