@@ -70,9 +70,10 @@ message Entry {
   // has no header and a server stripping unconditionally would eat its first bytes.
   bytes value = 2;
 
-  // The keys of the entries this one cannot be read without, as the writer knows them: each key
-  // preceded by its length in one byte. Set on Put only; never returned. Opaque to the service
-  // beyond that framing, and advisory: see Fetch.
+  // The entries this one cannot be read without, as the writer knows them: the 64-bit FNV-1a hash
+  // of each one's key, eight bytes each, least significant byte first. Set on Put only; never
+  // returned. Advisory: see Fetch. A hash, not the key, because a collision only costs a reader
+  // an entry it did not need, and the keys came to half as many bytes again as the values.
   bytes references = 3;
 }
 

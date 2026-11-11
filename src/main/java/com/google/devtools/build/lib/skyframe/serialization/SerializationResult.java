@@ -38,8 +38,8 @@ public abstract class SerializationResult<T> {
   }
 
   /**
-   * Returns the keys of the shared values {@link #getObject} refers to by fingerprint, packed as
-   * {@link References} packs them, or null if there are none or they were not recorded.
+   * Returns references to the shared values {@link #getObject} refers to by fingerprint, as {@link
+   * References} packs them, or null if there are none or they were not recorded.
    *
    * <p>A hint for {@link ReferencingWriter#put}, set only for results of {@link
    * ObjectCodecs#serializeMemoizedAsync}.

@@ -52,6 +52,7 @@ java_binary(
     ],
     main_class = "com.google.devtools.build.lib.skycache.DevAnalysisCacheServer",
     deps = [
+        "//src/main/java/com/google/devtools/build/lib/skyframe/serialization",
         "//src/main/protobuf:analysis_cache_java_grpc",
         "//src/main/protobuf:analysis_cache_java_proto",
         "//src/main/protobuf:snapshot_index_java_grpc",

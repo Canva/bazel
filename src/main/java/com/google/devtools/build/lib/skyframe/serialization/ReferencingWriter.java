@@ -31,9 +31,9 @@ public interface ReferencingWriter {
   /**
    * Stores {@code serializedBytes} under {@code key}, as {@link FingerprintValueStore#put} does.
    *
-   * @param references the key of each entry a reader of this one reads next, each preceded by its
-   *     length in one byte, as {@code References} packs them, or null if there are none. A hint:
-   *     the store may ignore it, and a writer may leave entries out.
+   * @param references a reference to each entry a reader of this one reads next, as {@code
+   *     References} packs them, or null if there are none. A hint: the store may ignore it, and a
+   *     writer may leave entries out.
    */
   WriteStatus put(KeyBytesProvider key, byte[] serializedBytes, @Nullable byte[] references);
 }

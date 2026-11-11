@@ -21,6 +21,7 @@ import build.aspect.skycache.v1.GetRequest;
 import build.aspect.skycache.v1.GetResponse;
 import build.aspect.skycache.v1.PutRequest;
 import build.aspect.skycache.v1.PutResponse;
+import com.google.devtools.build.lib.skyframe.serialization.References;
 import com.google.protobuf.ByteString;
 import io.grpc.Server;
 import io.grpc.netty.NettyServerBuilder;
@@ -47,9 +48,11 @@ public final class DevAnalysisCacheServer extends AnalysisCacheGrpc.AnalysisCach
 
   private final ConcurrentHashMap<ByteString, ByteString> entries = new ConcurrentHashMap<>();
 
-  /** By key, the keys its entry was written as referencing. */
-  private final ConcurrentHashMap<ByteString, List<ByteString>> references =
-      new ConcurrentHashMap<>();
+  /** By key, the hashes of the keys its entry was written as referencing. */
+  private final ConcurrentHashMap<ByteString, List<Long>> references = new ConcurrentHashMap<>();
+
+  /** By the hash a reference is, the key it refers to: the first written with that hash. */
+  private final ConcurrentHashMap<Long, ByteString> keysByHash = new ConcurrentHashMap<>();
 
   private final AtomicLong entriesPushed = new AtomicLong();
   private final AtomicLong keysRequested = new AtomicLong();
@@ -79,6 +82,8 @@ public final class DevAnalysisCacheServer extends AnalysisCacheGrpc.AnalysisCach
       entriesOffered.incrementAndGet();
       if (entries.putIfAbsent(entry.getKey(), entry.getValue()) == null) {
         stored++;
+        byte[] key = entry.getKey().toByteArray();
+        keysByHash.putIfAbsent(References.hash(key, 0, key.length), entry.getKey());
         if (!entry.getReferences().isEmpty()) {
           references.put(entry.getKey(), unpack(entry.getReferences()));
         }
@@ -88,15 +93,17 @@ public final class DevAnalysisCacheServer extends AnalysisCacheGrpc.AnalysisCach
     responseObserver.onCompleted();
   }
 
-  /** Splits references packed as each key preceded by its length in one byte. */
-  private static List<ByteString> unpack(ByteString packed) {
-    var keys = new ArrayList<ByteString>();
-    for (int i = 0; i < packed.size(); ) {
-      int length = packed.byteAt(i) & 0xff;
-      keys.add(packed.substring(i + 1, i + 1 + length));
-      i += 1 + length;
+  /** Splits packed references: key hashes of eight bytes, least significant first. */
+  private static List<Long> unpack(ByteString packed) {
+    var hashes = new ArrayList<Long>();
+    for (int i = 0; i + References.BYTES <= packed.size(); i += References.BYTES) {
+      long hash = 0;
+      for (int b = 0; b < References.BYTES; b++) {
+        hash |= (packed.byteAt(i + b) & 0xffL) << (8 * b);
+      }
+      hashes.add(hash);
     }
-    return keys;
+    return hashes;
   }
 
   /**
@@ -131,8 +138,9 @@ public final class DevAnalysisCacheServer extends AnalysisCacheGrpc.AnalysisCach
           if (!request.getExpand()) {
             continue;
           }
-          for (ByteString child : references.getOrDefault(key, List.of())) {
-            if (entries.containsKey(child) && sent.add(child)) {
+          for (Long reference : references.getOrDefault(key, List.of())) {
+            ByteString child = keysByHash.get(reference);
+            if (child != null && sent.add(child)) {
               frontier.add(child);
             }
           }

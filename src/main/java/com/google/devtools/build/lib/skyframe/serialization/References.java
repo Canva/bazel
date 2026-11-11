@@ -13,23 +13,28 @@
 // limitations under the License.
 package com.google.devtools.build.lib.skyframe.serialization;
 
-import static com.google.common.base.Preconditions.checkArgument;
-
+import com.google.errorprone.annotations.CanIgnoreReturnValue;
 import java.util.Arrays;
 import javax.annotation.Nullable;
 
 /**
- * Packs the keys of the entries a stored entry references, for {@link ReferencingWriter#put}.
+ * Packs references to the entries a stored entry references, for {@link ReferencingWriter#put}.
  *
- * <p>The packed form is each key preceded by its length in one byte. Keys are at most {@link
- * #MAX_KEY_BYTES} long: fingerprints are 16 bytes, and the longest invalidation data key is
- * shorter than a byte can count.
+ * <p>A reference is the 64-bit FNV-1a hash of the referenced entry's key, and the packed form is
+ * those hashes one after another, eight bytes each, least significant byte first. A hash rather
+ * than the key because references are only a hint for what to send a reader ahead of its asking:
+ * two keys with one hash cost a reader an entry it did not need, never a wrong one. In an upload
+ * of the Canva monorepo the keys themselves came to 9.3 GB beside 20 GB of values, most of it the
+ * path-like keys of invalidation data that the values name too.
  *
  * <p>Not thread-safe.
  */
 public final class References {
-  /** The longest key that can be packed. */
-  public static final int MAX_KEY_BYTES = 255;
+  /** Bytes one packed reference takes. */
+  public static final int BYTES = 8;
+
+  private static final long FNV_OFFSET_BASIS = 0xcbf29ce484222325L;
+  private static final long FNV_PRIME = 0x100000001b3L;
 
   private byte[] packed;
   private int size;
@@ -39,40 +44,42 @@ public final class References {
   }
 
   public References(int expectedKeys) {
-    this.packed = new byte[Math.max(1, expectedKeys) * (PackedFingerprint.BYTES + 1)];
+    this.packed = new byte[Math.max(1, expectedKeys) * BYTES];
   }
 
-  /** Adds the fingerprint at {@code offset} in {@code bytes}. */
+  /** Returns the reference to the entry stored under {@code length} bytes of {@code key}. */
+  public static long hash(byte[] key, int offset, int length) {
+    long hash = FNV_OFFSET_BASIS;
+    for (int i = offset; i < offset + length; i++) {
+      hash ^= key[i] & 0xff;
+      hash *= FNV_PRIME;
+    }
+    return hash;
+  }
+
+  /** Adds a reference to the entry whose key is the fingerprint at {@code offset} in {@code bytes}. */
+  @CanIgnoreReturnValue
   public References addFingerprintAt(byte[] bytes, int offset) {
-    ensureCapacity(PackedFingerprint.BYTES + 1);
-    packed[size++] = PackedFingerprint.BYTES;
-    System.arraycopy(bytes, offset, packed, size, PackedFingerprint.BYTES);
-    size += PackedFingerprint.BYTES;
-    return this;
+    return addHash(hash(bytes, offset, PackedFingerprint.BYTES));
   }
 
+  @CanIgnoreReturnValue
   public References add(PackedFingerprint fingerprint) {
-    ensureCapacity(PackedFingerprint.BYTES + 1);
-    packed[size++] = PackedFingerprint.BYTES;
-    fingerprint.copyTo(packed, size);
-    size += PackedFingerprint.BYTES;
-    return this;
+    return add(fingerprint.toBytes());
   }
 
+  @CanIgnoreReturnValue
   public References add(byte[] key) {
-    checkArgument(key.length > 0 && key.length <= MAX_KEY_BYTES, "key of %s bytes", key.length);
-    ensureCapacity(key.length + 1);
-    packed[size++] = (byte) key.length;
-    System.arraycopy(key, 0, packed, size, key.length);
-    size += key.length;
-    return this;
+    return addHash(hash(key, 0, key.length));
   }
 
+  @CanIgnoreReturnValue
   public References add(KeyBytesProvider key) {
-    return key instanceof PackedFingerprint fingerprint ? add(fingerprint) : add(key.toBytes());
+    return add(key.toBytes());
   }
 
-  /** Adds every key in {@code packed}, which may be null. */
+  /** Adds every reference in {@code packed}, which may be null. */
+  @CanIgnoreReturnValue
   public References addAll(@Nullable byte[] packed) {
     if (packed != null && packed.length > 0) {
       ensureCapacity(packed.length);
@@ -86,10 +93,18 @@ public final class References {
     return size == 0;
   }
 
-  /** Returns the packed keys, or null if there are none. */
+  /** Returns the packed references, or null if there are none. */
   @Nullable
   public byte[] pack() {
     return size == 0 ? null : Arrays.copyOf(packed, size);
+  }
+
+  private References addHash(long hash) {
+    ensureCapacity(BYTES);
+    for (int i = 0; i < BYTES; i++) {
+      packed[size++] = (byte) (hash >>> (8 * i));
+    }
+    return this;
   }
 
   private void ensureCapacity(int extra) {

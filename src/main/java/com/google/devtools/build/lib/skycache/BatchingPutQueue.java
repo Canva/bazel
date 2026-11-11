@@ -77,7 +77,7 @@ final class BatchingPutQueue {
    * As {@link #enqueue(byte[], byte[])}, telling the service which entries a reader of this one
    * reads next, so it can send them without being asked.
    *
-   * @param references each referenced key preceded by its length in one byte, or null
+   * @param references as {@code References} packs them, or null
    */
   SettableWriteStatus enqueue(byte[] key, byte[] value, @Nullable byte[] references) {
     SettableWriteStatus done = new SettableWriteStatus();
