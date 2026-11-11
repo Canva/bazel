@@ -13,6 +13,7 @@
 // limitations under the License.
 package com.google.devtools.build.lib.remote;
 
+import static com.google.common.util.concurrent.Futures.immediateFuture;
 import static com.google.common.util.concurrent.MoreExecutors.directExecutor;
 import static com.google.devtools.build.lib.remote.util.DigestUtil.isOldStyleDigestFunction;
 import static com.google.devtools.build.lib.remote.util.RxFutures.toCompletable;
@@ -476,6 +477,15 @@ class ByteStreamBuildEventArtifactUploader extends AbstractReferenceCounted
 
   @Override
   public ListenableFuture<PathConverter> upload(Map<Path, LocalFile> files) {
+    if (files.isEmpty()) {
+      // Answered here rather than by subscribing on the scheduler. Most build events reference no
+      // files, and this is called for every one of them from the thread that posts it: a build of
+      // 470,000 targets posts 1.2 million TargetConfigured and AspectConfigured events from one
+      // thread after analysis, and each submission to the upload executor contended for its
+      // queue's lock with the executor's own threads. That thread spent 22 seconds on it, two
+      // thirds of them waiting for the lock.
+      return immediateFuture(PathConverter.NO_CONVERSION);
+    }
     return toListenableFuture(doUpload(files).subscribeOn(scheduler));
   }
 
