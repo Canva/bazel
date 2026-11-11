@@ -108,6 +108,94 @@ public final class DeferredNestedSetCodecTest {
     assertThat(dumpStructure(top)).isEqualTo(dumpStructure(deserialized));
   }
 
+  /** Serializes and deserializes {@code value} as a value of its own, as a Skyframe value is. */
+  private static Object roundTrip(
+      ObjectCodecs codecs, FingerprintValueService fingerprintValueService, Object value)
+      throws Exception {
+    SerializationResult<ByteString> serialized =
+        codecs.serializeMemoizedAndBlocking(COMPRESSION_SERVICE, fingerprintValueService, value);
+    ListenableFuture<?> futureToBlockWritesOn = serialized.getFutureToBlockWritesOn();
+    if (futureToBlockWritesOn != null) {
+      var unused = futureToBlockWritesOn.get();
+    }
+    return codecs.deserializeMemoizedAndBlocking(
+        COMPRESSION_SERVICE, fingerprintValueService, serialized.getObject());
+  }
+
+  private static ObjectCodecs analysisCachingCodecs() {
+    return new ObjectCodecs(
+        AutoRegistry.get()
+            .getBuilder()
+            .add(new DeferredNestedSetCodec())
+            .add(new DepsetCodec())
+            .build());
+  }
+
+  @Test
+  public void equalSingletons_readFromSeparateValues_areOneSet() throws Exception {
+    var fingerprintValueService = FingerprintValueService.createForTesting();
+    ObjectCodecs codecs = analysisCachingCodecs();
+    // A singleton's element is written inside the set, so each value holding the set brings its
+    // own copy of the element. The lists stand for two such values.
+    NestedSet<ImmutableList<String>> set =
+        NestedSetBuilder.<ImmutableList<String>>stableOrder()
+            .add(ImmutableList.of("only", "element"))
+            .build();
+
+    var first = (ImmutableList<?>) roundTrip(codecs, fingerprintValueService, ImmutableList.of(set, "a"));
+    var second = (ImmutableList<?>) roundTrip(codecs, fingerprintValueService, ImmutableList.of(set, "b"));
+
+    assertThat(first.get(0)).isSameInstanceAs(second.get(0));
+    assertThat(((NestedSet<?>) first.get(0)).toList())
+        .containsExactly(ImmutableList.of("only", "element"));
+  }
+
+  @Test
+  public void singletonsOfDifferentOrder_stayDifferentSets() throws Exception {
+    var fingerprintValueService = FingerprintValueService.createForTesting();
+    ObjectCodecs codecs = analysisCachingCodecs();
+
+    var stable =
+        (NestedSet<?>)
+            roundTrip(
+                codecs, fingerprintValueService, NestedSetBuilder.stableOrder().add("x").build());
+    var link =
+        (NestedSet<?>)
+            roundTrip(
+                codecs, fingerprintValueService, NestedSetBuilder.linkOrder().add("x").build());
+
+    assertThat(stable.getOrder()).isEqualTo(Order.STABLE_ORDER);
+    assertThat(link.getOrder()).isEqualTo(Order.LINK_ORDER);
+  }
+
+  @Test
+  public void depsets_readFromSeparateValues_areOneDepsetPerSet() throws Exception {
+    var fingerprintValueService = FingerprintValueService.createForTesting();
+    ObjectCodecs codecs = analysisCachingCodecs();
+    Depset single = Depset.of(String.class, NestedSetBuilder.<String>stableOrder().add("x").build());
+    Depset several =
+        Depset.of(
+            String.class,
+            NestedSetBuilder.<String>stableOrder().addAll(ImmutableList.of("x", "y", "z")).build());
+    Depset empty = Depset.of(String.class, NestedSetBuilder.<String>emptySet(Order.STABLE_ORDER));
+
+    var first =
+        (ImmutableList<?>)
+            roundTrip(codecs, fingerprintValueService, ImmutableList.of(single, several, empty, 1));
+    var second =
+        (ImmutableList<?>)
+            roundTrip(codecs, fingerprintValueService, ImmutableList.of(single, several, empty, 2));
+
+    // A depset compares by identity, so these being the same objects is what makes two structs
+    // that hold them equal.
+    assertThat(first.get(0)).isSameInstanceAs(second.get(0));
+    assertThat(first.get(1)).isSameInstanceAs(second.get(1));
+    assertThat(first.get(2)).isSameInstanceAs(second.get(2));
+    assertThat(first.get(0)).isNotSameInstanceAs(first.get(1));
+    assertThat(((Depset) first.get(1)).getSet().toList()).containsExactly("x", "y", "z").inOrder();
+    assertThat(((Depset) first.get(1)).getElementClass()).isEqualTo(String.class);
+  }
+
   @SuppressWarnings({"rawtypes", "unchecked"})
   private static void verifyUsingShallowEquals(NestedSet original, NestedSet deserialized) {
     assertThat(original.shallowEquals(deserialized)).isTrue();

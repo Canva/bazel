@@ -123,6 +123,12 @@ public final class Depset implements StarlarkValue, Debug.ValueWithDebugAttribut
     this.set = set;
   }
 
+  /** The element class as stored: null for a depset that was created empty. */
+  @Nullable
+  Class<?> getRawElementClass() {
+    return elemClass;
+  }
+
   private static void checkElement(Object x, boolean strict) throws EvalException {
     // Historically the requirement for a depset element was isImmutable(x).
     // However, this check is neither necessary not sufficient.

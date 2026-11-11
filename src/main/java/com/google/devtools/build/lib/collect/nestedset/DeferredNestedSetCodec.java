@@ -67,8 +67,9 @@ public final class DeferredNestedSetCodec extends DeferredObjectCodec<NestedSet<
     int depthAndOrder = codedIn.readInt32();
     Order order = Order.values()[depthAndOrder & 3];
     int depth = depthAndOrder >> 2;
-    var builder = new DeserializationBuilder(order, depth);
-    if (codedIn.readBool()) { // singleton
+    boolean singleton = codedIn.readBool();
+    var builder = new DeserializationBuilder(order, depth, singleton);
+    if (singleton) {
       context.deserialize(codedIn, builder, DeserializationBuilder::setChildren);
     } else {
       context.getSharedValue(
@@ -94,18 +95,40 @@ public final class DeferredNestedSetCodec extends DeferredObjectCodec<NestedSet<
   private static final ConcurrentMap<Object, NestedSet<?>> deserializedByChildren =
       new MapMaker().weakKeys().weakValues().makeMap();
 
+  /**
+   * Singleton sets already deserialized, by their one element and their order.
+   *
+   * <p>A singleton's element is written inside the set rather than as a shared value, so each
+   * copy of the set brings its own copy of the element and the identity of the element says
+   * nothing. The sets are the same if the elements are equal, which is all a depset asks of its
+   * elements anyway. A crate's {@code CrateInfo} whose {@code deps} is a depset of one struct is
+   * the case that showed this: a leaf crate reached through eight dependents was reported as
+   * eight different crates.
+   *
+   * <p>The element is held strongly by its key, until the set, which also holds it, is collected.
+   */
+  private static final ConcurrentMap<SingletonKey, NestedSet<?>> deserializedSingletons =
+      new MapMaker().weakValues().makeMap();
+
+  private record SingletonKey(Order order, Object element) {}
+
   private static class DeserializationBuilder implements DeferredValue<NestedSet<?>> {
     private final Order order;
     private final int approxDepth;
+    private final boolean singleton;
     private Object children;
 
-    private DeserializationBuilder(Order order, int approxDepth) {
+    private DeserializationBuilder(Order order, int approxDepth, boolean singleton) {
       this.order = order;
       this.approxDepth = approxDepth;
+      this.singleton = singleton;
     }
 
     @Override
     public NestedSet<?> call() {
+      if (singleton) {
+        return canonicalSingleton();
+      }
       NestedSet<?> existing = deserializedByChildren.get(children);
       if (existing != null && existing.getOrder() == order) {
         return existing;
@@ -118,6 +141,20 @@ public final class DeferredNestedSetCodec extends DeferredObjectCodec<NestedSet<
         }
       }
       return created;
+    }
+
+    private NestedSet<?> canonicalSingleton() {
+      NestedSet<?> created = NestedSet.forDeserialization(order, approxDepth, children);
+      SingletonKey key;
+      NestedSet<?> existing;
+      try {
+        key = new SingletonKey(order, children);
+        existing = deserializedSingletons.putIfAbsent(key, created);
+      } catch (RuntimeException e) {
+        // An element that cannot be hashed cannot be in a depset that is ever flattened either.
+        return created;
+      }
+      return existing == null ? created : existing;
     }
 
     private static void setChildren(DeserializationBuilder builder, Object children) {

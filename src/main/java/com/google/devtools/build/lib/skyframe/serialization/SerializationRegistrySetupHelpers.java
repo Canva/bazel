@@ -42,6 +42,7 @@ import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.cmdline.PackageIdentifier;
 import com.google.devtools.build.lib.cmdline.RepositoryMapping;
 import com.google.devtools.build.lib.collect.nestedset.DeferredNestedSetCodec;
+import com.google.devtools.build.lib.collect.nestedset.DepsetCodec;
 import com.google.devtools.build.lib.packages.BazelStarlarkEnvironment;
 import com.google.devtools.build.lib.packages.StructProvider;
 import com.google.devtools.build.lib.rules.AliasConfiguredTarget;
@@ -183,6 +184,7 @@ public final class SerializationRegistrySetupHelpers {
           ImmutableList.<ObjectCodec<?>>builder()
               .add(ArrayCodec.forComponentType(Artifact.class))
               .add(new DeferredNestedSetCodec())
+              .add(new DepsetCodec())
               .add(new ValueSharingAdapter<>(Label.deferredCodec()))
               .add(ModuleCodec.moduleCodec())
               .add(StarlarkFunctionCodec.starlarkFunctionCodec())

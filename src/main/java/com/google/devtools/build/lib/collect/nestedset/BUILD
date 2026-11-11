@@ -18,6 +18,7 @@ java_library(
     srcs = [
         "DeferredNestedSetCodec.java",
         "Depset.java",
+        "DepsetCodec.java",
         "NestedArrayCodec.java",
         "NestedSet.java",
         "NestedSetBuilder.java",
