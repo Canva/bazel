@@ -241,8 +241,29 @@ public class IncrementalPackageRoots implements PackageRoots {
           return root;
         }
       }
+      Path externalDirectory = unloadedExternalPackagesDirectory;
+      if (externalDirectory != null) {
+        // The package was never loaded in this build: its configured targets came from the
+        // analysis cache. Every package of an external repository has that repository's directory
+        // as its root, so the root does not need the package.
+        return Root.fromPath(externalDirectory.getRelative(packageId.getRepository().getName()));
+      }
       return null;
     };
+  }
+
+  /**
+   * The directory external repositories are under, if a package of one may be asked for without
+   * having been loaded, or null.
+   *
+   * <p>With the analysis cache a build has the configured targets of its dependencies without their
+   * packages, and so has no root for, say, the toolchain headers a C++ compile reports having
+   * included. Header discovery would then report every such header as an undeclared inclusion.
+   */
+  @Nullable private static volatile Path unloadedExternalPackagesDirectory;
+
+  public static void setUnloadedExternalPackagesDirectory(@Nullable Path externalDirectory) {
+    unloadedExternalPackagesDirectory = externalDirectory;
   }
 
   // Intentionally don't allow concurrent events here to prevent a race condition between planting

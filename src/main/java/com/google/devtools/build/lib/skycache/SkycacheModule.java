@@ -42,6 +42,7 @@ import com.google.devtools.build.lib.runtime.WorkspaceBuilder;
 import com.google.devtools.build.lib.server.FailureDetails.FailureDetail;
 import com.google.devtools.build.lib.server.FailureDetails.RemoteAnalysisCaching;
 import com.google.devtools.build.lib.skycache.GitVersions.History;
+import com.google.devtools.build.lib.skyframe.IncrementalPackageRoots;
 import com.google.devtools.build.lib.skyframe.WorkspaceInfoFromDiff;
 import com.google.devtools.build.lib.skyframe.serialization.Fingerprinter;
 import com.google.devtools.build.lib.skyframe.serialization.SerializationModule;
@@ -193,6 +194,11 @@ public final class SkycacheModule extends SerializationModule {
     // Execution values are served as misses anyway, and some cannot be serialized: see
     // ExecutionValueCaching. A stock build keeps both its upload and its lookups.
     ExecutionValueCaching.setEnabled(!enabled);
+    // A reader has the configured targets of its dependencies without their packages, and still
+    // needs a root for the files of an external repository that an action reports having read: see
+    // IncrementalPackageRoots. A stock build keeps its lookup as it was.
+    IncrementalPackageRoots.setUnloadedExternalPackagesDirectory(
+        enabled ? env.getDirectories().getOutputBase().getRelative("external") : null);
     // Paths under external/ are versioned through the module files rather than followed; see
     // RepositoryBoundary. Like the above, a stock build keeps the serializer's original behaviour.
     FileDependencySerializer.setRepositoryBoundary(

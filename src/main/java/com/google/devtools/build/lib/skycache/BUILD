@@ -30,6 +30,7 @@ java_library(
         "//src/main/java/com/google/devtools/build/lib/skyframe:diff_awareness",
         "//src/main/java/com/google/devtools/build/lib/skyframe:fs_events_native_deps_service",
         "//src/main/java/com/google/devtools/build/lib/skyframe:incompatible_view_exception",
+        "//src/main/java/com/google/devtools/build/lib/skyframe:incremental_package_roots",
         "//src/main/java/com/google/devtools/build/lib/skyframe:local_diff_awareness",
         "//src/main/java/com/google/devtools/build/lib/skyframe:workspace_info",
         "//src/main/java/com/google/devtools/build/lib/skyframe/serialization",

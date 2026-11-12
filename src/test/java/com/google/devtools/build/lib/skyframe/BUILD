@@ -175,6 +175,23 @@ java_test(
 )
 
 java_test(
+    name = "IncrementalPackageRootsTest",
+    srcs = ["IncrementalPackageRootsTest.java"],
+    deps = [
+        "//src/main/java/com/google/devtools/build/lib/actions:package_roots",
+        "//src/main/java/com/google/devtools/build/lib/cmdline",
+        "//src/main/java/com/google/devtools/build/lib/skyframe:incremental_package_roots",
+        "//src/main/java/com/google/devtools/build/lib/vfs",
+        "//src/main/java/com/google/devtools/build/lib/vfs:pathfragment",
+        "//src/main/java/com/google/devtools/build/lib/vfs/inmemoryfs",
+        "//third_party/java/guava:eventbus",
+        "//third_party/java/jsr305_annotations",
+        "//third_party/java/junit",
+        "//third_party/java/truth",
+    ],
+)
+
+java_test(
     name = "DefaultSyscallCacheTest",
     srcs = ["DefaultSyscallCacheTest.java"],
     deps = [
