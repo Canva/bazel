@@ -152,6 +152,7 @@ public final class ArtifactFunction implements SkyFunction {
         case SkyValueRetriever.Restart unused:
           return null;
         case SkyValueRetriever.RetrievedValue v:
+          actionExecutor.createOutputDirectoriesOfRetrieved(derivedArtifact);
           return v.value();
         case SkyValueRetriever.NoCachedData unused:
           break;

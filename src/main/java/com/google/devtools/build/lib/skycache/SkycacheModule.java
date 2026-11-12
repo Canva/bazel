@@ -193,7 +193,9 @@ public final class SkycacheModule extends SerializationModule {
     FileDependencySerializer.setTolerateAbsoluteSymlinks(enabled);
     // Execution values are served as misses anyway, and some cannot be serialized: see
     // ExecutionValueCaching. A stock build keeps both its upload and its lookups.
-    ExecutionValueCaching.setEnabled(!enabled);
+    SkycacheFetchOptions fetchOptions = env.getOptions().getOptions(SkycacheFetchOptions.class);
+    ExecutionValueCaching.setEnabled(
+        !enabled || (fetchOptions != null && fetchOptions.getExecutionValues()));
     // A reader has the configured targets of its dependencies without their packages, and still
     // needs a root for the files of an external repository that an action reports having read: see
     // IncrementalPackageRoots. A stock build keeps its lookup as it was.

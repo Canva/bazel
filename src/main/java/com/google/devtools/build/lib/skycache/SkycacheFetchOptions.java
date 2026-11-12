@@ -35,4 +35,15 @@ public abstract class SkycacheFetchOptions extends OptionsBase {
               + " deserializing it, so in batches every level of nesting is another request."
               + " Falls back to batches against a service that cannot follow references.")
   public abstract boolean getFetchClosures();
+
+  @Option(
+      name = "canva_skycache_execution_values",
+      defaultValue = "false",
+      documentationCategory = OptionDocumentationCategory.UNDOCUMENTED,
+      effectTags = {OptionEffectTag.BAZEL_INTERNAL_CONFIGURATION},
+      help =
+          "Also write action results to the analysis cache and read them back, so that an action"
+              + " whose owner's declared sources and analysis inputs are unchanged is neither"
+              + " run nor looked up in the action cache. Experimental.")
+  public abstract boolean getExecutionValues();
 }

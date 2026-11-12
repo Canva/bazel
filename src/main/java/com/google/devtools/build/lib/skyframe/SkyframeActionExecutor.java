@@ -417,6 +417,35 @@ public final class SkyframeActionExecutor {
     return executorEngine.getExecRoot();
   }
 
+  /**
+   * Creates the directories the outputs of an action would be written to, for an action whose
+   * result came from the analysis cache and so was never prepared to run.
+   *
+   * <p>Nothing is written there, but code that resolves a path through the file system, such as a
+   * symlink in a later action's output tree that points at one of these outputs, expects the
+   * directories of the build's outputs to exist.
+   */
+  void createOutputDirectoriesOfRetrieved(ActionExecutionValue value) {
+    createOutputDirectoriesOfRetrieved(
+        ImmutableList.<Artifact>builder()
+            .addAll(value.getAllFileValues().keySet())
+            .addAll(value.getAllTreeArtifactValues().keySet())
+            .build());
+  }
+
+  /** As above, for an artifact whose own value, such as a tree's, came from the analysis cache. */
+  void createOutputDirectoriesOfRetrieved(Artifact artifact) {
+    createOutputDirectoriesOfRetrieved(ImmutableList.of(artifact));
+  }
+
+  private void createOutputDirectoriesOfRetrieved(ImmutableList<Artifact> outputs) {
+    try {
+      outputDirectoryHelper.createOutputDirectories(outputs);
+    } catch (ActionOutputDirectoryHelper.CreateOutputDirectoryException e) {
+      // The directories are a courtesy to later actions; one that needs them reports its own error.
+    }
+  }
+
   ActionContextRegistry getActionContextRegistry() {
     return executorEngine;
   }

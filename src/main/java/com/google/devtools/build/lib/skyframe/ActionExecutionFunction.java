@@ -189,6 +189,9 @@ public class ActionExecutionFunction implements SkyFunction {
         case SkyValueRetriever.Restart unused:
           return null;
         case SkyValueRetriever.RetrievedValue v:
+          if (v.value() instanceof ActionExecutionValue retrieved) {
+            skyframeActionExecutor.createOutputDirectoriesOfRetrieved(retrieved);
+          }
           return v.value();
         case SkyValueRetriever.NoCachedData unused:
           break;

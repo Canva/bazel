@@ -56,6 +56,7 @@ import com.google.devtools.build.lib.skyframe.serialization.KeyValueWriter;
 import com.google.devtools.build.lib.skyframe.serialization.ObjectCodecs;
 import com.google.devtools.build.lib.skyframe.serialization.PackedFingerprint;
 import com.google.devtools.build.lib.skyframe.serialization.ProfileCollector;
+import com.google.devtools.build.lib.skyframe.serialization.SerializationException;
 import com.google.devtools.build.lib.skyframe.serialization.SerializationResult;
 import com.google.devtools.build.lib.skyframe.serialization.SharedValueSerializationContext;
 import com.google.devtools.build.lib.skyframe.serialization.WriteStatus;
@@ -184,6 +185,9 @@ final class SelectedEntrySerializer {
     private final AtomicLong analysisNodes = new AtomicLong(0);
     private final AtomicLong executionNodes = new AtomicLong(0);
     private final AtomicLong unversionedNodes = new AtomicLong(0);
+    private final AtomicLong unserializableExecutionNodes = new AtomicLong(0);
+    private final java.util.concurrent.atomic.AtomicReference<String> firstUnserializable =
+        new java.util.concurrent.atomic.AtomicReference<>();
 
     SerializationStats() {}
 
@@ -206,6 +210,15 @@ final class SelectedEntrySerializer {
     /** Entries left out because they depend on a source newer than the version they are keyed at. */
     long unversionedNodes() {
       return unversionedNodes.get();
+    }
+
+    long unserializableExecutionNodes() {
+      return unserializableExecutionNodes.get();
+    }
+
+    @Nullable
+    String firstUnserializable() {
+      return firstUnserializable.get();
     }
   }
 
@@ -752,6 +765,15 @@ final class SelectedEntrySerializer {
       @Override
       public void onFailure(Throwable t) {
         writeStatuses.counters.entriesWaitingForInvalidationBytes.decrementAndGet();
+        if (isExecutionValue(key) && hasSerializationCause(t)) {
+          // An execution value that cannot be written, such as a symlink that resolves into the
+          // writer's output base, is left out: a reader then runs that action itself.
+          if (serializationStats.unserializableExecutionNodes.getAndIncrement() == 0) {
+            serializationStats.firstUnserializable.compareAndSet(null, key + ": " + t);
+          }
+          writeStatuses.selectedEntryDone();
+          return;
+        }
         writeStatuses.selectedEntryFailed(t);
       }
     }
@@ -946,6 +968,15 @@ final class SelectedEntrySerializer {
       consumer.accept(
           OBJECTS_UPLOADED, (double) SharedValueSerializationContext.COUNTERS.getObjectsUploaded());
     }
+  }
+
+  private static boolean hasSerializationCause(Throwable t) {
+    for (Throwable cause = t; cause != null; cause = cause.getCause()) {
+      if (cause instanceof SerializationException) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private static boolean isExecutionValue(SkyKey key) {

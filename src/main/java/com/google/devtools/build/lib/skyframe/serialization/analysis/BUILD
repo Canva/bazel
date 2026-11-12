@@ -164,7 +164,9 @@ java_library(
         "//src/main/java/com/google/devtools/build/lib/profiler",
         "//src/main/java/com/google/devtools/build/lib/profiler:counter_series_task_impl",
         "//src/main/java/com/google/devtools/build/lib/rules:alias",
+        "//src/main/java/com/google/devtools/build/lib/actions:file_metadata",
         "//src/main/java/com/google/devtools/build/lib/skyframe:action_execution_value",
+        "//src/main/java/com/google/devtools/build/lib/skyframe:tree_artifact_value",
         "//src/main/java/com/google/devtools/build/lib/skyframe:action_template_expansion_value",
         "//src/main/java/com/google/devtools/build/lib/skyframe:bzl_load_value",
         "//src/main/java/com/google/devtools/build/lib/skyframe:configured_target_key",
@@ -359,6 +361,7 @@ java_library(
     srcs = ["ValidatingAnalysisCacheClient.java"],
     visibility = ["//src:__subpackages__"],
     deps = [
+        ":execution_value_caching",
         ":file_dependency_deserializer",
         ":lookup_result",
         ":lookup_result_impl",
