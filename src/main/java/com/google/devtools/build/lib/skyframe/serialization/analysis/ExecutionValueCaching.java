@@ -39,4 +39,18 @@ public final class ExecutionValueCaching {
   public static boolean isEnabled() {
     return enabled;
   }
+
+  private static volatile boolean localResults = true;
+
+  /**
+   * Sets whether the result of an action whose outputs exist only on the writer's disk is written
+   * too, described to readers as remote: see {@code ExecutionValuesForReaders}.
+   */
+  public static void setLocalResultsEnabled(boolean localResults) {
+    ExecutionValueCaching.localResults = localResults;
+  }
+
+  public static boolean localResultsEnabled() {
+    return localResults;
+  }
 }

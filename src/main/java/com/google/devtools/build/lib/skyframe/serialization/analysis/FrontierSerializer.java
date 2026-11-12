@@ -35,7 +35,6 @@ import com.google.devtools.build.lib.actions.ActionLookupSummaryKey;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.Artifact.DerivedArtifact;
 import com.google.devtools.build.lib.actions.Artifact.SourceArtifact;
-import com.google.devtools.build.lib.actions.FileArtifactValue;
 import com.google.devtools.build.lib.analysis.ConfiguredTargetValue;
 import com.google.devtools.build.lib.analysis.configuredtargets.InputFileConfiguredTarget;
 import com.google.devtools.build.lib.cmdline.Label;
@@ -48,11 +47,9 @@ import com.google.devtools.build.lib.rules.AliasConfiguredTarget;
 import com.google.devtools.build.lib.server.FailureDetails.FailureDetail;
 import com.google.devtools.build.lib.server.FailureDetails.RemoteAnalysisCaching;
 import com.google.devtools.build.lib.server.FailureDetails.RemoteAnalysisCaching.Code;
-import com.google.devtools.build.lib.skyframe.ActionExecutionValue.WithRichData;
 import com.google.devtools.build.lib.skyframe.ActionExecutionValue;
 import com.google.devtools.build.lib.skyframe.ActionTemplateExpansionValue.ActionTemplateExpansionKey;
 import com.google.devtools.build.lib.skyframe.BzlLoadValue;
-import com.google.devtools.build.lib.skyframe.TreeArtifactValue;
 import com.google.devtools.build.lib.skyframe.serialization.FingerprintValueService;
 import com.google.devtools.build.lib.skyframe.serialization.FrontierNodeVersion;
 import com.google.devtools.build.lib.skyframe.serialization.KeyValueWriter;
@@ -505,40 +502,11 @@ public final class FrontierSerializer {
   }
 
   private static boolean shouldUpload(ActionLookupData data, InMemoryNodeEntry node) {
-    if (CANVA_REMOTE_OUTPUTS_ONLY) {
-      // A reader that takes an action's result from the cache does not run the action, so the
-      // outputs the result describes must be somewhere the reader can get them: the remote cache.
-      // A file that exists only in this output base, such as the output of a file write or of a
-      // locally run spawn, would be metadata for content the reader has no way to obtain. Leaving
-      // the entry out makes the reader run that action itself.
-      return data.valueIsShareable()
-          && node.getValue() instanceof ActionExecutionValue value
-          && !(value instanceof WithRichData)
-          && allOutputsRemote(value);
-    }
-    // `valueIsShareable` is used by a different system that does not serialize
-    // RunfilesArtifactValue, but the FrontierSerializer should do so. A `WithRichData`
-    // value type can be used to distinguish this case.
-    return data.valueIsShareable() || node.getValue() instanceof WithRichData;
-  }
-
-  /** Canva: see {@link #shouldUpload}. Always on while execution values are experimental. */
-  private static final boolean CANVA_REMOTE_OUTPUTS_ONLY = true;
-
-  private static boolean allOutputsRemote(ActionExecutionValue value) {
-    for (FileArtifactValue file : value.getAllFileValues().values()) {
-      if (!file.isRemote() && !file.isInline()) {
-        return false;
-      }
-    }
-    for (TreeArtifactValue tree : value.getAllTreeArtifactValues().values()) {
-      for (FileArtifactValue child : tree.getChildValues().values()) {
-        if (!child.isRemote() && !child.isInline()) {
-          return false;
-        }
-      }
-    }
-    return true;
+    // Upstream also uploads the unshareable results that carry rich data (runfiles trees). Those
+    // describe files a reader may not be able to obtain, so here a reader builds them itself.
+    return data.valueIsShareable()
+        && node.getValue() instanceof ActionExecutionValue value
+        && ExecutionValuesForReaders.forReader(value) != null;
   }
 
   @Nullable

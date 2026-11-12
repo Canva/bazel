@@ -129,6 +129,7 @@ java_library(
     name = "frontier_serializer",
     srcs = [
         "AnalysisValueWithMtsv.java",
+        "ExecutionValuesForReaders.java",
         "FrontierSerializer.java",
         "SelectedEntrySerializer.java",
         "SkyValueUploadedEvent.java",

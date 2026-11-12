@@ -46,4 +46,15 @@ public abstract class SkycacheFetchOptions extends OptionsBase {
               + " whose owner's declared sources and analysis inputs are unchanged is neither"
               + " run nor looked up in the action cache. Experimental.")
   public abstract boolean getExecutionValues();
+
+  @Option(
+      name = "canva_skycache_local_action_results",
+      defaultValue = "true",
+      documentationCategory = OptionDocumentationCategory.UNDOCUMENTED,
+      effectTags = {OptionEffectTag.BAZEL_INTERNAL_CONFIGURATION},
+      help =
+          "With --canva_skycache_execution_values, also write the results of actions whose outputs"
+              + " exist only in the writer's output base, such as file writes. A reader is told"
+              + " those outputs are remote, and runs the action only if something reads one.")
+  public abstract boolean getLocalActionResults();
 }

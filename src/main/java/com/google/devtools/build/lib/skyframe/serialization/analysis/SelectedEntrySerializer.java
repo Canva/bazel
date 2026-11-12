@@ -43,6 +43,7 @@ import com.google.devtools.build.lib.profiler.CounterSeriesTask;
 import com.google.devtools.build.lib.profiler.CounterSeriesTask.Color;
 import com.google.devtools.build.lib.profiler.CounterSeriesTaskImpl;
 import com.google.devtools.build.lib.profiler.Profiler;
+import com.google.devtools.build.lib.skyframe.ActionExecutionValue;
 import com.google.devtools.build.lib.skyframe.ConfiguredTargetKey;
 import com.google.devtools.build.lib.skyframe.FileOpNodeOrFuture;
 import com.google.devtools.build.lib.skyframe.FileOpNodeOrFuture.FileOpNode;
@@ -388,8 +389,20 @@ final class SelectedEntrySerializer {
               entry.getMaxTransitiveSourceVersion());
         }
         case ActionLookupData lookupData -> {
-          serializationStats.registerExecutionNode();
-          uploadExecutionEntry(lookupData, null);
+          if (entry == null) {
+            throw new MissingSkyframeEntryException(lookupData);
+          }
+          // Selected because it has a form a reader can use: see FrontierSerializer#shouldUpload.
+          ActionExecutionValue forReader =
+              entry.getValue() instanceof ActionExecutionValue value
+                  ? ExecutionValuesForReaders.forReader(value)
+                  : null;
+          if (forReader == null) {
+            writeStatuses.selectedEntryDone();
+          } else {
+            serializationStats.registerExecutionNode();
+            uploadExecutionEntry(lookupData, forReader);
+          }
         }
         case DerivedArtifact artifact -> {
           // This case handles the subclasses of DerivedArtifact. DerivedArtifact itself will show

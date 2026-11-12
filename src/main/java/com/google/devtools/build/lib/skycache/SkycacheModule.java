@@ -196,6 +196,8 @@ public final class SkycacheModule extends SerializationModule {
     SkycacheFetchOptions fetchOptions = env.getOptions().getOptions(SkycacheFetchOptions.class);
     ExecutionValueCaching.setEnabled(
         !enabled || (fetchOptions != null && fetchOptions.getExecutionValues()));
+    ExecutionValueCaching.setLocalResultsEnabled(
+        fetchOptions == null || fetchOptions.getLocalActionResults());
     // A reader has the configured targets of its dependencies without their packages, and still
     // needs a root for the files of an external repository that an action reports having read: see
     // IncrementalPackageRoots. A stock build keeps its lookup as it was.
