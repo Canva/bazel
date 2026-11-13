@@ -99,10 +99,33 @@ public final class ExecutionValueCaching {
 
   /** The outcomes recorded since the last reset, most common first, or an empty string. */
   public static String testResultOutcomes() {
-    return testResultOutcomes.entrySet().stream()
+    return summarize(testResultOutcomes, Integer.MAX_VALUE);
+  }
+
+  private static final ConcurrentHashMap<String, LongAdder> actionsRun = new ConcurrentHashMap<>();
+  private static final Set<Object> actionsRunNoted = ConcurrentHashMap.newKeySet();
+
+  /**
+   * Records that a reader runs {@code action} although it takes action results from the cache.
+   * {@code what} is the action's mnemonic and the reason, and each action counts once.
+   */
+  public static void noteActionRun(String what, Object action) {
+    if (actionsRunNoted.add(action)) {
+      actionsRun.computeIfAbsent(what, unused -> new LongAdder()).increment();
+    }
+  }
+
+  /** The {@code limit} most common kinds of action a reader ran, or an empty string. */
+  public static String actionsRun(int limit) {
+    return summarize(actionsRun, limit);
+  }
+
+  private static String summarize(ConcurrentHashMap<String, LongAdder> counts, int limit) {
+    return counts.entrySet().stream()
         .sorted(
             Comparator.comparingLong((Map.Entry<String, LongAdder> e) -> -e.getValue().sum())
                 .thenComparing(Map.Entry::getKey))
+        .limit(limit)
         .map(e -> e.getValue().sum() + " " + e.getKey())
         .collect(Collectors.joining(", "));
   }
@@ -110,5 +133,7 @@ public final class ExecutionValueCaching {
   public static void resetTestResultOutcomes() {
     testResultOutcomes.clear();
     testResultsNoted.clear();
+    actionsRun.clear();
+    actionsRunNoted.clear();
   }
 }

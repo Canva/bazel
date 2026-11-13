@@ -526,7 +526,10 @@ final class SkycacheServicesSupplier implements RemoteAnalysisCachingServicesSup
             : "; first failure: " + client.getFirstMissingData())
         + (ExecutionValueCaching.testResultOutcomes().isEmpty()
             ? ""
-            : "; test results: " + ExecutionValueCaching.testResultOutcomes());
+            : "; test results: " + ExecutionValueCaching.testResultOutcomes())
+        + (ExecutionValueCaching.actionsRun(1).isEmpty()
+            ? ""
+            : "; actions run: " + ExecutionValueCaching.actionsRun(30));
   }
 
   @Override

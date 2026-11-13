@@ -181,17 +181,21 @@ public class ActionExecutionFunction implements SkyFunction {
     ActionLookupData actionLookupData = (ActionLookupData) skyKey.argument();
     RemoteAnalysisCacheReaderDepsProvider remoteCachingDependencies =
         cachingDependenciesSupplier.get();
-    boolean retrieve =
+    boolean reading =
         remoteCachingDependencies.mode().isRetrievalEnabled()
             && !remoteCachingDependencies.getSkycacheAnalysisOnly()
-            && ExecutionValueCaching.isEnabled()
-            && !skyframeActionExecutor.shouldSkipRetrieval(actionLookupData);
+            && ExecutionValueCaching.isEnabled();
+    boolean retrieve = reading && !skyframeActionExecutor.shouldSkipRetrieval(actionLookupData);
+    // Why a reader runs this action although it takes action results from the cache, for the
+    // summary at the end of the build.
+    String ranBecause = reading && !retrieve ? "run again for an output that was lost" : null;
     // The action to tell that its result was retrieved, if it is one that wants to know.
     NotifyOnActionCacheHit toNotify = null;
     if (retrieve && !actionLookupData.valueIsShareable()) {
       // A runfiles tree, or an action that depends on the build id. No writer uploads their
       // results, so there is nothing to look up, with one exception: a test that passed.
       retrieve = false;
+      ranBecause = "never cached";
       if (ExecutionValueCaching.testResultsEnabled()) {
         Action unshareable =
             ActionUtils.getActionForLookupData(
@@ -202,6 +206,7 @@ public class ActionExecutionFunction implements SkyFunction {
         if (unshareable instanceof NotifyOnActionCacheHit notify) {
           toNotify = notify;
           retrieve = true;
+          ranBecause = null;
         }
       }
     }
@@ -223,11 +228,13 @@ public class ActionExecutionFunction implements SkyFunction {
             return retrieved;
           }
           // The action declined the result, and noted why: it runs as if nothing had been found.
+          ranBecause = "declined";
           break;
         case SkyValueRetriever.NoCachedData unused:
           if (toNotify != null) {
             ExecutionValueCaching.noteTestResult("not cached", actionLookupData);
           }
+          ranBecause = "not cached";
           break;
       }
     }
@@ -240,6 +247,10 @@ public class ActionExecutionFunction implements SkyFunction {
                 .isRetrievalEnabled());
     if (action == null) {
       return null;
+    }
+    if (ranBecause != null) {
+      ExecutionValueCaching.noteActionRun(
+          action.getMnemonic() + " " + ranBecause, actionLookupData);
     }
 
     try {
