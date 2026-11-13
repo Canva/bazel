@@ -40,6 +40,10 @@ import javax.annotation.Nullable;
  * SkyframeActionExecutor#shouldSkipRetrieval}). The reader therefore runs such an action only when
  * something consumes its output, instead of always.
  *
+ * <p>An unresolved symlink is written as it is. Its metadata is its content, and the reader puts
+ * the link back on disk when it takes the result, since an action that runs locally reads the link
+ * rather than the metadata.
+ *
  * <p>Results this cannot be done for are left out, and a reader runs those actions itself.
  */
 final class ExecutionValuesForReaders {
@@ -69,7 +73,15 @@ final class ExecutionValuesForReaders {
       if (file.isRemote() || file.isInline()) {
         continue;
       }
-      if (!ExecutionValueCaching.localResultsEnabled() || !isLocalRegularFile(file)) {
+      if (!ExecutionValueCaching.localResultsEnabled()) {
+        return null;
+      }
+      if (isUnresolvedSymlink(file)) {
+        // Complete as it is: the metadata holds the link's target, which is its whole content. The
+        // reader recreates the link from it when it takes the result.
+        continue;
+      }
+      if (!isLocalRegularFile(file)) {
         return null;
       }
       changed = true;
@@ -83,7 +95,7 @@ final class ExecutionValuesForReaders {
       FileArtifactValue file = entry.getValue();
       files.put(
           entry.getKey(),
-          file.isRemote() || file.isInline()
+          file.isRemote() || file.isInline() || isUnresolvedSymlink(file)
               ? file
               : FileArtifactValue.createForRemoteFile(
                   file.getDigest(), file.getSize(), REMOTE_CACHE_LOCATION));
@@ -93,6 +105,11 @@ final class ExecutionValuesForReaders {
         value.getAllTreeArtifactValues(),
         /* richArtifactData= */ null,
         value.getDiscoveredModules());
+  }
+
+  /** Whether {@code file} is a symlink Bazel does not follow, declared as a symlink output. */
+  private static boolean isUnresolvedSymlink(FileArtifactValue file) {
+    return file.getType() == FileStateType.SYMLINK;
   }
 
   /**

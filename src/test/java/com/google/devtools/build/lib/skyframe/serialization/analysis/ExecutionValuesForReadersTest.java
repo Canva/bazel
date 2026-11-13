@@ -31,6 +31,7 @@ import com.google.devtools.build.lib.collect.nestedset.Order;
 import com.google.devtools.build.lib.skyframe.ActionExecutionValue;
 import com.google.devtools.build.lib.skyframe.TreeArtifactValue;
 import com.google.devtools.build.lib.testutil.Scratch;
+import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import org.junit.After;
 import org.junit.Test;
@@ -96,6 +97,20 @@ public final class ExecutionValuesForReadersTest {
 
     assertThat(ExecutionValuesForReaders.forReader(files(ImmutableMap.of(output("a"), symlink))))
         .isNull();
+  }
+
+  @Test
+  public void unresolvedSymlink_isWrittenAsItIs() throws Exception {
+    Path link = new Scratch().resolve("/execroot/out/link");
+    link.getParentDirectory().createDirectoryAndParents();
+    link.createSymbolicLink(PathFragment.create("../some/target"));
+    FileArtifactValue symlink = FileArtifactValue.createForUnresolvedSymlink(link);
+    ActionExecutionValue value = files(ImmutableMap.of(output("link"), symlink, output("f"), LOCAL));
+
+    ActionExecutionValue forReader = ExecutionValuesForReaders.forReader(value);
+
+    assertThat(forReader.getAllFileValues().get(output("link"))).isSameInstanceAs(symlink);
+    assertThat(forReader.getAllFileValues().get(output("f")).isRemote()).isTrue();
   }
 
   @Test

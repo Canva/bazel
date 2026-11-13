@@ -68,6 +68,7 @@ import com.google.devtools.build.lib.actions.EnvironmentalExecException;
 import com.google.devtools.build.lib.actions.ExecException;
 import com.google.devtools.build.lib.actions.Executor;
 import com.google.devtools.build.lib.actions.FileArtifactValue;
+import com.google.devtools.build.lib.actions.FileStateType;
 import com.google.devtools.build.lib.actions.FilesetOutputTree;
 import com.google.devtools.build.lib.actions.ImportantOutputHandler;
 import com.google.devtools.build.lib.actions.ImportantOutputHandler.ImportantOutputException;
@@ -114,6 +115,7 @@ import com.google.devtools.build.lib.util.DetailedExitCode;
 import com.google.devtools.build.lib.util.io.FileOutErr;
 import com.google.devtools.build.lib.vfs.FileSystem;
 import com.google.devtools.build.lib.vfs.FileSystem.NotASymlinkException;
+import com.google.devtools.build.lib.vfs.FileSystemUtils;
 import com.google.devtools.build.lib.vfs.OutputPermissions;
 import com.google.devtools.build.lib.vfs.OutputService;
 import com.google.devtools.build.lib.vfs.OutputService.ActionFileSystemType;
@@ -431,6 +433,21 @@ public final class SkyframeActionExecutor {
             .addAll(value.getAllFileValues().keySet())
             .addAll(value.getAllTreeArtifactValues().keySet())
             .build());
+    // An unresolved symlink has no content to fetch later: its target is in its metadata. Put it
+    // on disk now, where an action that runs locally will read it from.
+    value
+        .getAllFileValues()
+        .forEach(
+            (artifact, metadata) -> {
+              if (metadata.getType() == FileStateType.SYMLINK) {
+                try {
+                  FileSystemUtils.ensureSymbolicLink(
+                      artifact.getPath(), metadata.getUnresolvedSymlinkTarget());
+                } catch (IOException e) {
+                  // As for the directories: an action that needs the link reports its own error.
+                }
+              }
+            });
   }
 
   /** As above, for an artifact whose own value, such as a tree's, came from the analysis cache. */
