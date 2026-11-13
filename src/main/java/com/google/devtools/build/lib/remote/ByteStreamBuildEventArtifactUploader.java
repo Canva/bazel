@@ -23,6 +23,7 @@ import static com.google.devtools.build.lib.remote.util.Utils.grpcAwareErrorMess
 import build.bazel.remote.execution.v2.Digest;
 import build.bazel.remote.execution.v2.DigestFunction;
 import build.bazel.remote.execution.v2.RequestMetadata;
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Ascii;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Strings;
@@ -68,6 +69,9 @@ class ByteStreamBuildEventArtifactUploader extends AbstractReferenceCounted
   private static final Pattern TEST_LOG_PATTERN = Pattern.compile(".*/bazel-out/[^/]*/testlogs/.*");
   private static final Pattern BUILD_LOG_PATTERN =
       Pattern.compile(".*/bazel-out/_tmp/actions/std(err|out)-.*");
+  // A substring every path matching the pattern of the same name contains.
+  private static final String TEST_LOG_LITERAL = "/testlogs/";
+  private static final String BUILD_LOG_LITERAL = "/bazel-out/_tmp/actions/std";
 
   private final Executor executor;
   private final ExtendedEventHandler reporter;
@@ -318,9 +322,26 @@ class ByteStreamBuildEventArtifactUploader extends AbstractReferenceCounted
     return result;
   }
 
-  private boolean isBuildOrTestLog(PathMetadata path) {
-    return TEST_LOG_PATTERN.matcher(path.getPath().getPathString()).matches()
-        || BUILD_LOG_PATTERN.matcher(path.getPath().getPathString()).matches();
+  private static boolean isBuildOrTestLog(PathMetadata path) {
+    return isBuildOrTestLog(path.getPath().getPathString());
+  }
+
+  /**
+   * Whether {@code path} is a test log or the stdout or stderr file of an action.
+   *
+   * <p>With {@code --remote_build_event_upload=minimal} this is asked twice for every file on disk
+   * that a build event references. Those are mostly outputs of the targets built that are source
+   * files or were written by an action that ran locally, and there are many: a target is reported
+   * with all the files in its output groups. Each pattern starts with {@code .*}, so on a path it
+   * does not match it tries every position before giving up. A pattern cannot match a path that
+   * lacks its literal part, and almost no path has one, so that is checked first and costs a
+   * fraction of the match. Before this check, a build of 470,000 targets spent 2,500 seconds of
+   * CPU time in the two patterns.
+   */
+  @VisibleForTesting
+  static boolean isBuildOrTestLog(String path) {
+    return (path.contains(TEST_LOG_LITERAL) && TEST_LOG_PATTERN.matcher(path).matches())
+        || (path.contains(BUILD_LOG_LITERAL) && BUILD_LOG_PATTERN.matcher(path).matches());
   }
 
   private Single<List<PathMetadata>> queryCombinedCache(
