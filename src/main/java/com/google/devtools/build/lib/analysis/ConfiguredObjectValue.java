@@ -16,6 +16,7 @@ package com.google.devtools.build.lib.analysis;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.packages.Package;
 import com.google.devtools.build.skyframe.NotComparableSkyValue;
+import javax.annotation.Nullable;
 
 /**
  * Super-interface for {@link ConfiguredTargetValue} and {@link RuleConfiguredObjectValue}
@@ -43,4 +44,21 @@ public interface ConfiguredObjectValue extends NotComparableSkyValue {
   // TODO(b/283125139): Most builds never need to build a repo mapping manifest. Store transitive
   // packages outside of configured object values to save the wasted field.
   NestedSet<Package.Metadata> getTransitivePackages();
+
+  /**
+   * Returns one package of each repository that has a package among this value's transitive
+   * packages, for a value that does not carry the packages themselves, and null for any other.
+   *
+   * <p>A value read from the remote analysis cache is the one that has them. Its transitive
+   * packages are not written to the cache, since for a target near the top of a build they are
+   * most of the build's packages. What a dependent that is analysed afresh needs of them, when it
+   * writes the repository mapping manifest of an executable, is the repository mapping of every
+   * repository that may contribute runfiles, and any one package of a repository carries that.
+   * Without them the manifest lacks the repositories that are only reached through cached
+   * dependencies, and the runfiles libraries cannot resolve their apparent names.
+   */
+  @Nullable
+  default NestedSet<Package.Metadata> getTransitiveRepositoryPackages() {
+    return null;
+  }
 }

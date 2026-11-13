@@ -121,15 +121,19 @@ public final class ConfiguredTargetAndDataProducer
   private void acceptValue(ConfiguredTargetValue configuredTargetValue) {
     this.configuredTargetValue = configuredTargetValue;
     var transitivePackages = configuredTargetValue.getTransitivePackages();
-    // A value served from the remote analysis cache has no transitive packages:
-      // RemoteConfiguredTargetValue returns null because they are never serialized. Inside
-      // Google the two never meet, since shouldStoreTransitivePackagesInLoadingAndAnalysis()
-      // tracks allowExternalRepositories and external repositories are disabled there. With
-      // bzlmod that flag is always on, so every cached dependency would otherwise reach
-      // NestedSetBuilder.addTransitive(null). Skipping matches how BuildDriverFunction
-      // already treats the same null; the aggregate then omits packages from cached
-      // subgraphs, which under-reports symlink planting and repo-mapping manifests rather
-      // than crashing.
+    if (transitivePackages == null) {
+      // A value served from the remote analysis cache has no transitive packages: they are never
+      // serialized. It has one package for each repository among them instead, which is what the
+      // repository mapping manifest of a dependent needs. The dependent's own transitive packages
+      // then hold those in place of the packages of the cached subgraph, so anything else that
+      // reads them (the planting of symlinks to package roots) sees fewer packages than there
+      // are, as it did when cached values contributed nothing.
+      //
+      // Both are null for a value written before these were serialized, and inside Google,
+      // where shouldStoreTransitivePackagesInLoadingAndAnalysis() tracks
+      // allowExternalRepositories and so cached values and tracked packages never meet.
+      transitivePackages = configuredTargetValue.getTransitiveRepositoryPackages();
+    }
     if (transitiveState.storeTransitivePackages() && transitivePackages != null) {
       transitiveState.updateTransitivePackages(
           ConfiguredTargetKey.fromConfiguredTarget(configuredTargetValue.getConfiguredTarget()),

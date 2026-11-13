@@ -32,6 +32,7 @@ java_library(
         "//src/main/java/com/google/devtools/build/lib/skyframe:incompatible_view_exception",
         "//src/main/java/com/google/devtools/build/lib/skyframe:incremental_package_roots",
         "//src/main/java/com/google/devtools/build/lib/skyframe:local_diff_awareness",
+        "//src/main/java/com/google/devtools/build/lib/skyframe:rule_configured_target_value",
         "//src/main/java/com/google/devtools/build/lib/skyframe:workspace_info",
         "//src/main/java/com/google/devtools/build/lib/skyframe/serialization",
         "//src/main/java/com/google/devtools/build/lib/skyframe/serialization/analysis/proto:analysis_cache_service_metadata_status_java_proto",
