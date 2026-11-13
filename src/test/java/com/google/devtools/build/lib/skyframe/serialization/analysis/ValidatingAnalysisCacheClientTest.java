@@ -233,18 +233,20 @@ public final class ValidatingAnalysisCacheClientTest {
   }
 
   @Test
-  public void executionValues_areAlwaysMisses() throws Exception {
+  public void executionValue_isInvalidatedByAChangedSourceToo() throws Exception {
     FileKey build = workspaceFile("pkg/BUILD", 50);
     FileKey defs = workspaceFile("pkg/defs.bzl", 60);
+    FileKey source = workspaceFile("pkg/main.cc", 70);
     var nested =
         (AbstractNestedFileOpNodes)
-            AbstractNestedFileOpNodes.from(
-                ImmutableSet.<FileOpNode>of(build, defs), /* sourceFile= */ null);
+            AbstractNestedFileOpNodes.from(ImmutableSet.<FileOpNode>of(build, defs), source);
     ByteString execution = putEntry(DATA_TYPE_EXECUTION_NODE, nodeInfo(nested).cacheKey());
 
-    var client = client(ImmutableList.of(), ImmutableList.of());
-    assertThat(lookup(client, execution)).isEmpty();
-    assertThat(client.getInvalidationReasons()).containsExactly("execution value", 1L);
+    assertHit(execution, ImmutableList.of(), ImmutableList.of());
+    // An action reads the content of its sources, which the analysis of its target does not.
+    assertInvalidated(execution, ImmutableList.of(), ImmutableList.of("pkg/main.cc"));
+    assertInvalidated(
+        execution, ImmutableList.of(new DepotChange("pkg/defs.bzl", 101)), ImmutableList.of());
   }
 
   @Test
