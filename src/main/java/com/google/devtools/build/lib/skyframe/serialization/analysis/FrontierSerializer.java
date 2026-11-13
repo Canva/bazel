@@ -32,6 +32,7 @@ import com.google.common.util.concurrent.ListenableFuture;
 import com.google.devtools.build.lib.actions.ActionLookupData;
 import com.google.devtools.build.lib.actions.ActionLookupKey;
 import com.google.devtools.build.lib.actions.ActionLookupSummaryKey;
+import com.google.devtools.build.lib.actions.ActionLookupValue;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.Artifact.DerivedArtifact;
 import com.google.devtools.build.lib.actions.Artifact.SourceArtifact;
@@ -108,12 +109,21 @@ public final class FrontierSerializer {
     InMemoryGraph graph = evaluator.getInMemoryGraph();
     var stopwatch = Stopwatch.createStarted();
 
+    var leftOut = new ExecutionValuesForReaders.LeftOut();
     SelectionResult selectionResult =
         computeSelectionResult(
             graph,
             serializationDependenciesProvider.getActiveDirectoriesMatcher(),
             /* traversalMode= */ TraversalMode.FOR_SERIALIZATION,
-            serializationDependenciesProvider.getSkycacheAnalysisOnly());
+            serializationDependenciesProvider.getSkycacheAnalysisOnly(),
+            leftOut);
+    if (!leftOut.isEmpty()) {
+      reporter.handle(
+          Event.info(
+              String.format(
+                  "Skycache write: left out %d action results a reader could not use: %s",
+                  leftOut.total(), leftOut.summary(40))));
+    }
     ImmutableSet<SkyKey> selectedKeys = selectionResult.selectedKeys();
     if (!keepStateAfterBuild && serializationDependenciesProvider.shouldMinimizeMemory()) {
       clearActionLookupValues(graph, selectedKeys);
@@ -283,7 +293,8 @@ public final class FrontierSerializer {
             graph,
             activeDirectoriesMatcher,
             /* traversalMode= */ TraversalMode.FOR_POST_ANALYSIS_MINIMIZE_MEMORY,
-            /* skycacheAnalysisOnly= */ false);
+            /* skycacheAnalysisOnly= */ false,
+            new ExecutionValuesForReaders.LeftOut());
     ImmutableSet<SkyKey> selectedKeys = selectionResult.selection().keySet();
     Set<PackageIdentifier> packageIdentifierSet = Sets.newConcurrentHashSet();
     graph.parallelForEach(
@@ -337,15 +348,16 @@ public final class FrontierSerializer {
       InMemoryGraph graph,
       Optional<Predicate<PackageIdentifier>> activeDirectoriesMatcher,
       TraversalMode traversalMode,
-      boolean skycacheAnalysisOnly) {
+      boolean skycacheAnalysisOnly,
+      ExecutionValuesForReaders.LeftOut leftOut) {
     if (activeDirectoriesMatcher.isPresent()) {
       ImmutableMap<SkyKey, SelectionMarking> selection =
           computeSelection(
-              graph, activeDirectoriesMatcher.get(), traversalMode, skycacheAnalysisOnly);
+              graph, activeDirectoriesMatcher.get(), traversalMode, skycacheAnalysisOnly, leftOut);
       return new SelectionResult(selection);
     } else {
       ImmutableMap<SkyKey, SelectionMarking> selection =
-          computeFullSelection(graph, traversalMode, skycacheAnalysisOnly);
+          computeFullSelection(graph, traversalMode, skycacheAnalysisOnly, leftOut);
       return new SelectionResult(selection);
     }
   }
@@ -354,7 +366,8 @@ public final class FrontierSerializer {
       InMemoryGraph graph,
       Predicate<PackageIdentifier> matcher,
       TraversalMode traversalMode,
-      boolean skycacheAnalysisOnly) {
+      boolean skycacheAnalysisOnly,
+      ExecutionValuesForReaders.LeftOut leftOut) {
     var selection = new ConcurrentHashMap<SkyKey, SelectionMarking>();
     graph.parallelForEach(
         node -> {
@@ -372,7 +385,7 @@ public final class FrontierSerializer {
             }
             case ActionLookupData data
                 when !skycacheAnalysisOnly && traversalMode == TraversalMode.FOR_SERIALIZATION -> {
-              if (shouldUpload(data, node)) {
+              if (shouldUpload(data, node, graph, leftOut)) {
                 // Notably, we don't check the `matcher` for execution values, because we want to
                 // serialize all ActionLookupData even if they're below the frontier, because the
                 // owning ActionLookupValue will be pruned.
@@ -423,7 +436,10 @@ public final class FrontierSerializer {
   }
 
   private static ImmutableMap<SkyKey, SelectionMarking> computeFullSelection(
-      InMemoryGraph graph, TraversalMode traversalMode, boolean skycacheAnalysisOnly) {
+      InMemoryGraph graph,
+      TraversalMode traversalMode,
+      boolean skycacheAnalysisOnly,
+      ExecutionValuesForReaders.LeftOut leftOut) {
     var selection = new ConcurrentHashMap<SkyKey, SelectionMarking>();
     graph.parallelForEach(
         node -> {
@@ -440,7 +456,8 @@ public final class FrontierSerializer {
             }
             case ActionLookupData data
                 when !skycacheAnalysisOnly && traversalMode == TraversalMode.FOR_SERIALIZATION -> {
-              if (data.getActionLookupKey().getLabel() != null && shouldUpload(data, node)) {
+              if (data.getActionLookupKey().getLabel() != null
+                  && shouldUpload(data, node, graph, leftOut)) {
                 selection.putIfAbsent(data, FRONTIER_CANDIDATE);
               }
             }
@@ -501,15 +518,42 @@ public final class FrontierSerializer {
     out.flush();
   }
 
-  private static boolean shouldUpload(ActionLookupData data, InMemoryNodeEntry node) {
+  private static boolean shouldUpload(
+      ActionLookupData data,
+      InMemoryNodeEntry node,
+      InMemoryGraph graph,
+      ExecutionValuesForReaders.LeftOut leftOut) {
     // Upstream also uploads the unshareable results that carry rich data (runfiles trees). Those
     // describe files a reader may not be able to obtain, so here a reader builds them itself.
     //
     // A test's result is not shareable either, because a test has to be evaluated in every build
     // to be reported. A reader reports one it takes from the cache, so those are uploaded.
-    return node.getValue() instanceof ActionExecutionValue value
-        && (data.valueIsShareable() || ExecutionValuesForReaders.isTestResult(value))
-        && ExecutionValuesForReaders.forReader(value) != null;
+    if (!(node.getValue() instanceof ActionExecutionValue value)) {
+      return false;
+    }
+    String[] reason = new String[1];
+    if (!data.valueIsShareable() && !ExecutionValuesForReaders.isTestResult(value)) {
+      reason[0] =
+          value instanceof ActionExecutionValue.WithRichData
+              ? "a runfiles tree"
+              : "a result that depends on the build it was made in";
+    } else if (ExecutionValuesForReaders.forReader(value, why -> reason[0] = why) != null) {
+      return true;
+    }
+    leftOut.add(mnemonic(data, graph) + ": " + reason[0], data::toString);
+    return false;
+  }
+
+  /** The mnemonic of the action {@code data} is the result of, for a message. */
+  private static String mnemonic(ActionLookupData data, InMemoryGraph graph) {
+    InMemoryNodeEntry owner = graph.getIfPresent(data.getActionLookupKey());
+    if (owner != null && owner.getValue() instanceof ActionLookupValue actions) {
+      int index = data.getActionIndex();
+      if (index < actions.getActions().size()) {
+        return actions.getActions().get(index).getMnemonic();
+      }
+    }
+    return "(unknown action)";
   }
 
   @Nullable

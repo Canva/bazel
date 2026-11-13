@@ -65,6 +65,7 @@ import com.google.devtools.build.lib.server.FailureDetails.Execution.Code;
 import com.google.devtools.build.lib.server.FailureDetails.FailureDetail;
 import com.google.devtools.build.lib.server.FailureDetails.TestAction;
 import com.google.devtools.build.lib.server.FailureDetails.Toolchain;
+import com.google.devtools.build.lib.skyframe.serialization.analysis.ExecutionValueCaching;
 import com.google.devtools.build.lib.util.DetailedExitCode;
 import com.google.devtools.build.lib.util.Fingerprint;
 import com.google.devtools.build.lib.vfs.Dirent;
@@ -716,27 +717,32 @@ public class TestRunnerAction extends AbstractAction
   public boolean resultRetrieved(
       ActionCachedContext context, Function<Artifact, FileArtifactValue> outputMetadata) {
     if (!shouldAcceptCachedResult()) {
-      return false;
+      return declined("cached results are not accepted for this test");
     }
     Map<String, String> executionInfo = testProperties.getExecutionInfo();
     if (executionInfo.containsKey(ExecutionRequirements.NO_CACHE)
         || executionInfo.containsKey(ExecutionRequirements.LOCAL)
         || executionInfo.containsKey(ExecutionRequirements.NO_REMOTE)
         || executionInfo.containsKey(ExecutionRequirements.NO_REMOTE_CACHE)) {
-      return false;
+      return declined("the test is tagged not to be cached or not to run remotely");
     }
     FileArtifactValue status = outputMetadata.apply(cacheStatus);
     if (status == null || !status.isInline()) {
-      return false;
+      return declined("the result has no status");
     }
     TestResultData data;
     try (InputStream in = status.getInputStream()) {
       data = TestResultData.parseFrom(in, ExtensionRegistry.getEmptyRegistry());
     } catch (IOException e) {
-      return false;
+      return declined("the status cannot be read");
     }
     if (!data.getCachable() || !data.getTestPassed()) {
-      return false;
+      return declined("the test did not pass");
+    }
+    if (data.hasPassedLog()) {
+      // The path of the log in the output base of the build that ran the test. Nothing is there in
+      // this one, and a summary that named it would have the build event uploader look for it.
+      data = data.toBuilder().clearPassedLog().build();
     }
     try {
       context
@@ -747,10 +753,15 @@ public class TestRunnerAction extends AbstractAction
                   .newCachedTestResult(
                       context.getExecRoot(), this, data, ImmutableMultimap.of()));
     } catch (IOException e) {
-      return false;
+      return declined("the result cannot be reported");
     }
     cachedTestResultData = Optional.of(data);
     return true;
+  }
+
+  private static boolean declined(String why) {
+    ExecutionValueCaching.noteTestResult("declined because " + why);
+    return false;
   }
 
   @VisibleForTesting

@@ -94,13 +94,21 @@ public final class ExecutionValuesForReadersTest {
   }
 
   @Test
-  public void symlinkToALocalFile_isLeftOut() {
+  public void symlinkToALocalFile_isDescribedAsRemoteByWhatItLeadsTo() {
     FileArtifactValue symlink =
         FileArtifactValue.createFromExistingWithResolvedPath(
             LOCAL, PathFragment.create("/workspace/pkg/source.txt"));
+    DerivedArtifact output = output("a");
 
-    assertThat(ExecutionValuesForReaders.forReader(files(ImmutableMap.of(output("a"), symlink))))
-        .isNull();
+    FileArtifactValue forReader =
+        ExecutionValuesForReaders.forReader(files(ImmutableMap.of(output, symlink)))
+            .getAllFileValues()
+            .get(output);
+
+    assertThat(forReader.isRemote()).isTrue();
+    assertThat(forReader.getDigest()).isEqualTo(DIGEST);
+    assertThat(forReader.getSize()).isEqualTo(10);
+    assertThat(forReader.getResolvedPath()).isNull();
   }
 
   @Test
@@ -129,7 +137,7 @@ public final class ExecutionValuesForReadersTest {
   }
 
   @Test
-  public void treeWithALocalChild_isLeftOut() {
+  public void treeWithALocalChild_childIsDescribedAsRemote() {
     TreeArtifact tree = TreeArtifact.create(OUTPUT_ROOT, OUTPUT_ROOT.getExecPath().getRelative("t"), KEY);
     tree.setGeneratingActionKey(ACTION);
     TreeArtifactValue localTree =
@@ -141,10 +149,35 @@ public final class ExecutionValuesForReadersTest {
             .putChild(TreeFileArtifact.createTreeOutput(tree, "child"), REMOTE)
             .build();
 
+    ActionExecutionValue allRemote = trees(ImmutableMap.of(tree, remoteTree));
+    assertThat(ExecutionValuesForReaders.forReader(allRemote)).isSameInstanceAs(allRemote);
+
+    TreeArtifactValue forReader =
+        ExecutionValuesForReaders.forReader(trees(ImmutableMap.of(tree, localTree)))
+            .getAllTreeArtifactValues()
+            .get(tree);
+    assertThat(forReader.isEntirelyRemote()).isTrue();
+    assertThat(forReader).isEqualTo(remoteTree);
+
+    ExecutionValueCaching.setLocalResultsEnabled(false);
     assertThat(ExecutionValuesForReaders.forReader(trees(ImmutableMap.of(tree, localTree))))
         .isNull();
-    assertThat(ExecutionValuesForReaders.forReader(trees(ImmutableMap.of(tree, remoteTree))))
-        .isNotNull();
+  }
+
+  @Test
+  public void treeHoldingALocalDirectory_isLeftOut() {
+    TreeArtifact tree =
+        TreeArtifact.create(OUTPUT_ROOT, OUTPUT_ROOT.getExecPath().getRelative("u"), KEY);
+    tree.setGeneratingActionKey(ACTION);
+    TreeArtifactValue withDirectory =
+        TreeArtifactValue.newBuilder(tree)
+            .putChild(
+                TreeFileArtifact.createTreeOutput(tree, "child"),
+                FileArtifactValue.createForDirectoryWithMtime(/* mtimeNanos= */ 1))
+            .build();
+
+    assertThat(ExecutionValuesForReaders.forReader(trees(ImmutableMap.of(tree, withDirectory))))
+        .isNull();
   }
 
   @Test
@@ -196,6 +229,48 @@ public final class ExecutionValuesForReadersTest {
 
     assertThat(ExecutionValuesForReaders.forReader(files(ImmutableMap.of(statusFile, LOCAL))))
         .isNull();
+  }
+
+  @Test
+  public void leftOutResult_saysWhy() throws Exception {
+    ExecutionValueCaching.setTestResultsEnabled(true);
+    DerivedArtifact statusFile =
+        writtenOutput("testlogs/pkg/c_test/test.cache_status", testStatus(/* passed= */ false));
+    var reasons = new java.util.ArrayList<String>();
+
+    assertThat(
+            ExecutionValuesForReaders.forReader(
+                files(ImmutableMap.of(statusFile, LOCAL)), reasons::add))
+        .isNull();
+    assertThat(
+            ExecutionValuesForReaders.forReader(
+                files(
+                    ImmutableMap.of(
+                        output("pkg/dir"),
+                        FileArtifactValue.createForDirectoryWithMtime(/* mtimeNanos= */ 1))),
+                reasons::add))
+        .isNull();
+
+    assertThat(reasons)
+        .containsExactly("a test with status FAILED", "an output that is a local DIRECTORY")
+        .inOrder();
+  }
+
+  @Test
+  public void leftOut_countsByKindWithAnExample() {
+    var leftOut = new ExecutionValuesForReaders.LeftOut();
+    assertThat(leftOut.isEmpty()).isTrue();
+
+    leftOut.add("Javac: a runfiles tree", () -> "first");
+    leftOut.add("Javac: a runfiles tree", () -> "second");
+    leftOut.add("Genrule: local results are not cached", () -> "third");
+
+    assertThat(leftOut.total()).isEqualTo(3);
+    assertThat(leftOut.summary(1)).isEqualTo("2 Javac: a runfiles tree (e.g. first)");
+    assertThat(leftOut.summary(5))
+        .isEqualTo(
+            "2 Javac: a runfiles tree (e.g. first); 1 Genrule: local results are not cached (e.g."
+                + " third)");
   }
 
   private static byte[] testStatus(boolean passed) {

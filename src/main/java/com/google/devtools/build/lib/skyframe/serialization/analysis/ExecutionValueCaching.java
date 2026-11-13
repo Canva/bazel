@@ -13,6 +13,13 @@
 // limitations under the License.
 package com.google.devtools.build.lib.skyframe.serialization.analysis;
 
+import java.util.Comparator;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.LongAdder;
+import java.util.stream.Collectors;
+
 /**
  * Whether the remote analysis cache holds execution values: action results and the artifacts they
  * produced, alongside the analysis values.
@@ -66,5 +73,42 @@ public final class ExecutionValueCaching {
 
   public static boolean testResultsEnabled() {
     return testResults;
+  }
+
+  private static final ConcurrentHashMap<String, LongAdder> testResultOutcomes =
+      new ConcurrentHashMap<>();
+  private static final Set<Object> testResultsNoted = ConcurrentHashMap.newKeySet();
+
+  /**
+   * Records what became of a test result a reader looked up: that it was served, that the cache
+   * had none, or why the test declined the one it had.
+   */
+  public static void noteTestResult(String outcome) {
+    testResultOutcomes.computeIfAbsent(outcome, unused -> new LongAdder()).increment();
+  }
+
+  /**
+   * As {@link #noteTestResult(String)}, once for each {@code test}: an evaluation that is started
+   * again looks its result up again.
+   */
+  public static void noteTestResult(String outcome, Object test) {
+    if (testResultsNoted.add(test)) {
+      noteTestResult(outcome);
+    }
+  }
+
+  /** The outcomes recorded since the last reset, most common first, or an empty string. */
+  public static String testResultOutcomes() {
+    return testResultOutcomes.entrySet().stream()
+        .sorted(
+            Comparator.comparingLong((Map.Entry<String, LongAdder> e) -> -e.getValue().sum())
+                .thenComparing(Map.Entry::getKey))
+        .map(e -> e.getValue().sum() + " " + e.getKey())
+        .collect(Collectors.joining(", "));
+  }
+
+  public static void resetTestResultOutcomes() {
+    testResultOutcomes.clear();
+    testResultsNoted.clear();
   }
 }

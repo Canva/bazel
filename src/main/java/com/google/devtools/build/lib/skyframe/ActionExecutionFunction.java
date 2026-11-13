@@ -216,12 +216,18 @@ public class ActionExecutionFunction implements SkyFunction {
           }
           if (toNotify == null
               || skyframeActionExecutor.notifyResultRetrieved(toNotify, retrieved)) {
+            if (toNotify != null) {
+              ExecutionValueCaching.noteTestResult("served");
+            }
             skyframeActionExecutor.createOutputDirectoriesOfRetrieved(retrieved);
             return retrieved;
           }
-          // The action declined the result: it runs as if nothing had been found.
+          // The action declined the result, and noted why: it runs as if nothing had been found.
           break;
         case SkyValueRetriever.NoCachedData unused:
+          if (toNotify != null) {
+            ExecutionValueCaching.noteTestResult("not cached", actionLookupData);
+          }
           break;
       }
     }

@@ -150,6 +150,7 @@ java_library(
         ":missing_skyframe_entry_exception",
         ":remote_analysis_cache_mode",
         ":serialization_dependencies_provider",
+        "//src/main/java/com/google/devtools/build/lib/actions",
         "//src/main/java/com/google/devtools/build/lib/actions:action_lookup_data",
         "//src/main/java/com/google/devtools/build/lib/actions:action_lookup_key",
         "//src/main/java/com/google/devtools/build/lib/actions:artifacts",

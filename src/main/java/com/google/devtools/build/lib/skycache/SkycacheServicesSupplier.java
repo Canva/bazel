@@ -38,6 +38,7 @@ import com.google.devtools.build.lib.skyframe.serialization.FingerprintValueStor
 import com.google.devtools.build.lib.skyframe.serialization.Fingerprinter;
 import com.google.devtools.build.lib.skyframe.serialization.SkycacheMetadataParams;
 import com.google.devtools.build.lib.skyframe.serialization.analysis.ClientId;
+import com.google.devtools.build.lib.skyframe.serialization.analysis.ExecutionValueCaching;
 import com.google.devtools.build.lib.skyframe.serialization.analysis.RemoteAnalysisCacheMode;
 import com.google.devtools.build.lib.skyframe.serialization.analysis.RemoteAnalysisCacheClient;
 import com.google.devtools.build.lib.skyframe.serialization.analysis.RemoteAnalysisCachingOptions;
@@ -522,7 +523,10 @@ final class SkycacheServicesSupplier implements RemoteAnalysisCachingServicesSup
         reasons.isEmpty() ? "" : " (" + reasons + ")")
         + (client.getFirstMissingData() == null
             ? ""
-            : "; first failure: " + client.getFirstMissingData());
+            : "; first failure: " + client.getFirstMissingData())
+        + (ExecutionValueCaching.testResultOutcomes().isEmpty()
+            ? ""
+            : "; test results: " + ExecutionValueCaching.testResultOutcomes());
   }
 
   @Override
