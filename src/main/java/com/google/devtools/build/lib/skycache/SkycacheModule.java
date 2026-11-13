@@ -52,6 +52,7 @@ import com.google.devtools.build.lib.skyframe.serialization.analysis.RemoteAnaly
 import com.google.devtools.build.lib.skyframe.serialization.analysis.RemoteAnalysisCacheMode;
 import com.google.devtools.build.lib.skyframe.serialization.analysis.RemoteAnalysisCachingServicesOptions;
 import com.google.devtools.build.lib.skyframe.serialization.analysis.RemoteAnalysisCachingServicesSupplier;
+import com.google.devtools.build.lib.skyframe.serialization.analysis.ValidatingAnalysisCacheClient;
 import com.google.devtools.build.lib.util.AbruptExitException;
 import com.google.devtools.build.lib.util.DetailedExitCode;
 import com.google.devtools.build.skyframe.IntVersion;
@@ -335,9 +336,22 @@ public final class SkycacheModule extends SerializationModule {
       FileDependencySerializer.setMaxDependencyVersion(base.ordinal());
     }
     if (reads) {
+      // Which listings changed is asked of git separately. Taking every changed file to have
+      // changed its directory's listing would invalidate the package of every file edited in
+      // place, and the analysis of everything above it.
+      ListenableFuture<ValidatingAnalysisCacheClient.ClientChanges> clientChanges =
+          Futures.transformAsync(
+              changes,
+              paths ->
+                  gitExecutor.submit(
+                      () ->
+                          new ValidatingAnalysisCacheClient.ClientChanges(
+                              paths, GitVersions.changedListings(git, base, paths))),
+              directExecutor());
+      pendingGit.add(clientChanges);
       supplier.setValidation(
           new SkycacheServicesSupplier.Validation(
-              base.ordinal(), changes, compressionService, fingerprinter));
+              base.ordinal(), clientChanges, compressionService, fingerprinter));
     }
     // A build that both reads and writes is a developer's, between commits: neither asking which
     // commits were uploaded nor claiming its own was is meaningful.

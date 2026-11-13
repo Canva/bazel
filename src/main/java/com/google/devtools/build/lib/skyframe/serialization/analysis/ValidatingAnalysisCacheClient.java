@@ -22,6 +22,7 @@ import static com.google.common.util.concurrent.MoreExecutors.directExecutor;
 import static java.util.Comparator.naturalOrder;
 
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.ImmutableSortedMap;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
@@ -234,6 +235,35 @@ public final class ValidatingAnalysisCacheClient implements RemoteAnalysisCacheC
         Futures.transform(
             clientChanges,
             changes -> Checker.of(storage, new VersionedChanges(changes)),
+            directExecutor()),
+        validityHorizon);
+  }
+
+  /**
+   * How a reader's workspace differs from the version it reads at.
+   *
+   * @param paths every file and directory that differs: added, deleted, edited or changed in type
+   * @param listings every directory whose listing differs: one that gained or lost an entry, or
+   *     has an entry that changed type. An edit in place changes no listing.
+   */
+  public record ClientChanges(ImmutableSet<String> paths, ImmutableSet<String> listings) {}
+
+  /**
+   * As {@link #create(Storage, int, ListenableFuture)}, for client changes that say which listings
+   * changed. Without that, every changed file counts as a change to the listing of its directory.
+   */
+  public static ValidatingAnalysisCacheClient createWithListings(
+      Storage storage, int validityHorizon, ListenableFuture<ClientChanges> clientChanges) {
+    checkArgument(
+        validityHorizon >= 0 && validityHorizon < VersionedChanges.CLIENT_CHANGE,
+        "validity horizon %s is out of range",
+        validityHorizon);
+    return new ValidatingAnalysisCacheClient(
+        storage,
+        Futures.transform(
+            clientChanges,
+            changes ->
+                Checker.of(storage, new VersionedChanges(changes.paths(), changes.listings())),
             directExecutor()),
         validityHorizon);
   }

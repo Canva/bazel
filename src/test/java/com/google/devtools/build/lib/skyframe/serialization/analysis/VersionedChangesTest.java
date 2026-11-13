@@ -44,6 +44,25 @@ public final class VersionedChangesTest {
   }
 
   @Test
+  public void clientChangesWithListings_editInPlaceChangesNoListing() {
+    var changes =
+        new VersionedChanges(
+            /* clientFileChanges= */ ImmutableList.of("pkg/edited.txt", "pkg/sub/added.txt"),
+            /* clientListingChanges= */ ImmutableList.of("pkg/sub"));
+
+    assertThat(changes.matchFileChange("pkg/edited.txt", 0)).isEqualTo(CLIENT_CHANGE);
+    assertThat(changes.matchFileChange("pkg/sub/added.txt", 0)).isEqualTo(CLIENT_CHANGE);
+    assertThat(changes.matchListingChange("pkg", 0)).isEqualTo(NO_MATCH);
+    assertThat(changes.matchListingChange("pkg/sub", 0)).isEqualTo(CLIENT_CHANGE);
+    assertThat(changes.isEmpty()).isFalse();
+  }
+
+  @Test
+  public void clientChangesWithListings_noChangesIsEmpty() {
+    assertThat(new VersionedChanges(ImmutableList.of(), ImmutableList.of()).isEmpty()).isTrue();
+  }
+
+  @Test
   public void registerChange_matches() {
     var changes = new VersionedChanges(ImmutableList.of());
     changes.registerFileChange("abc/def", 10);

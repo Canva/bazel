@@ -99,9 +99,29 @@ final class VersionedChanges {
     }
   }
 
+  /**
+   * Client changes whose listing changes are known, rather than induced from the file changes.
+   *
+   * <p>Inducing them says that every changed file changed the listing of its directory. That is
+   * right for a file added, deleted or changed in type and wrong for one edited in place, which is
+   * most of what a client changes. Since a glob depends on the listings it reads, an induced
+   * listing change invalidates the package of every edited file that a glob can see, and with it
+   * the analysis of everything that depends on that package.
+   *
+   * @param clientFileChanges every path that differs in the client
+   * @param clientListingChanges every directory whose listing differs in the client
+   */
+  VersionedChanges(Iterable<String> clientFileChanges, Iterable<String> clientListingChanges) {
+    for (var change : clientFileChanges) {
+      insertChange(change, CLIENT_CHANGE, fileChanges);
+    }
+    for (var change : clientListingChanges) {
+      insertChange(change, CLIENT_CHANGE, listingChanges);
+    }
+  }
+
   boolean isEmpty() {
-    // `listingChanges` is empty iff `fileChanges` is empty, so checking one is enough.
-    return fileChanges.isEmpty();
+    return fileChanges.isEmpty() && listingChanges.isEmpty();
   }
 
   @VisibleForTesting

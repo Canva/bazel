@@ -94,13 +94,13 @@ final class SkycacheServicesSupplier implements RemoteAnalysisCachingServicesSup
    * What a reader checks entries against.
    *
    * @param validityHorizon the version every key is written at
-   * @param clientChanges every path that differs from that version in this workspace
+   * @param clientChanges how this workspace differs from that version
    * @param compressionService decompresses invalidation data, as the writer compressed it
    * @param fingerprinter keys invalidation data, as the writer keyed it
    */
   record Validation(
       int validityHorizon,
-      ListenableFuture<ImmutableSet<String>> clientChanges,
+      ListenableFuture<ValidatingAnalysisCacheClient.ClientChanges> clientChanges,
       CompressionService compressionService,
       Fingerprinter fingerprinter) {}
 
@@ -389,7 +389,7 @@ final class SkycacheServicesSupplier implements RemoteAnalysisCachingServicesSup
       return;
     }
     validatingClient =
-        ValidatingAnalysisCacheClient.create(
+        ValidatingAnalysisCacheClient.createWithListings(
             new ValidatingAnalysisCacheClient.Storage(
                 store,
                 COMMAND_EXECUTOR,
