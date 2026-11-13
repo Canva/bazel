@@ -31,8 +31,11 @@ import com.google.devtools.build.lib.collect.nestedset.Order;
 import com.google.devtools.build.lib.skyframe.ActionExecutionValue;
 import com.google.devtools.build.lib.skyframe.TreeArtifactValue;
 import com.google.devtools.build.lib.testutil.Scratch;
+import com.google.devtools.build.lib.vfs.FileSystemUtils;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.PathFragment;
+import com.google.devtools.build.lib.view.test.TestStatus.BlazeTestStatus;
+import com.google.devtools.build.lib.view.test.TestStatus.TestResultData;
 import org.junit.After;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -55,6 +58,7 @@ public final class ExecutionValuesForReadersTest {
   @After
   public void resetStaticState() {
     ExecutionValueCaching.setLocalResultsEnabled(true);
+    ExecutionValueCaching.setTestResultsEnabled(false);
   }
 
   @Test
@@ -141,6 +145,74 @@ public final class ExecutionValuesForReadersTest {
         .isNull();
     assertThat(ExecutionValuesForReaders.forReader(trees(ImmutableMap.of(tree, remoteTree))))
         .isNotNull();
+  }
+
+  @Test
+  public void passedTest_statusIsWrittenInlineAndTheRestAsRemote() throws Exception {
+    ExecutionValueCaching.setTestResultsEnabled(true);
+    byte[] status = testStatus(/* passed= */ true);
+    DerivedArtifact statusFile = writtenOutput("testlogs/pkg/a_test/test.cache_status", status);
+    DerivedArtifact log = output("testlogs/pkg/a_test/test.log");
+    DerivedArtifact undeclared = output("testlogs/pkg/a_test/test.outputs");
+    FileArtifactValue directory = FileArtifactValue.createForDirectoryWithMtime(/* mtimeNanos= */ 1);
+    ActionExecutionValue result =
+        files(ImmutableMap.of(log, LOCAL, statusFile, LOCAL, undeclared, directory));
+
+    assertThat(ExecutionValuesForReaders.isTestResult(result)).isTrue();
+    ActionExecutionValue forReader = ExecutionValuesForReaders.forReader(result);
+
+    FileArtifactValue inline = forReader.getAllFileValues().get(statusFile);
+    assertThat(inline.isInline()).isTrue();
+    assertThat(inline.getInputStream().readAllBytes()).isEqualTo(status);
+    assertThat(forReader.getAllFileValues().get(log).isRemote()).isTrue();
+    assertThat(forReader.getAllFileValues().get(log).getDigest()).isEqualTo(DIGEST);
+    assertThat(forReader.getAllFileValues().get(undeclared)).isSameInstanceAs(directory);
+  }
+
+  @Test
+  public void failedTest_isLeftOut() throws Exception {
+    ExecutionValueCaching.setTestResultsEnabled(true);
+    DerivedArtifact statusFile =
+        writtenOutput("testlogs/pkg/b_test/test.cache_status", testStatus(/* passed= */ false));
+
+    assertThat(ExecutionValuesForReaders.forReader(files(ImmutableMap.of(statusFile, LOCAL))))
+        .isNull();
+  }
+
+  @Test
+  public void testWithoutAStatusFile_isLeftOut() {
+    ExecutionValueCaching.setTestResultsEnabled(true);
+
+    assertThat(
+            ExecutionValuesForReaders.forReader(
+                files(ImmutableMap.of(output("testlogs/pkg/c_test/test.cache_status"), LOCAL))))
+        .isNull();
+  }
+
+  @Test
+  public void passedTest_isLeftOutWhenTestResultsAreOff() throws Exception {
+    DerivedArtifact statusFile =
+        writtenOutput("testlogs/pkg/d_test/test.cache_status", testStatus(/* passed= */ true));
+
+    assertThat(ExecutionValuesForReaders.forReader(files(ImmutableMap.of(statusFile, LOCAL))))
+        .isNull();
+  }
+
+  private static byte[] testStatus(boolean passed) {
+    return TestResultData.newBuilder()
+        .setCachable(true)
+        .setTestPassed(passed)
+        .setStatus(passed ? BlazeTestStatus.PASSED : BlazeTestStatus.FAILED)
+        .build()
+        .toByteArray();
+  }
+
+  private static DerivedArtifact writtenOutput(String rootRelativePath, byte[] content)
+      throws Exception {
+    DerivedArtifact result = output(rootRelativePath);
+    result.getPath().getParentDirectory().createDirectoryAndParents();
+    FileSystemUtils.writeContent(result.getPath(), content);
+    return result;
   }
 
   private static ActionExecutionValue files(ImmutableMap<Artifact, FileArtifactValue> files) {

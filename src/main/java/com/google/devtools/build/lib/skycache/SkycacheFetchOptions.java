@@ -57,4 +57,16 @@ public abstract class SkycacheFetchOptions extends OptionsBase {
               + " exist only in the writer's output base, such as file writes. A reader is told"
               + " those outputs are remote, and runs the action only if something reads one.")
   public abstract boolean getLocalActionResults();
+
+  @Option(
+      name = "canva_skycache_test_results",
+      defaultValue = "false",
+      documentationCategory = OptionDocumentationCategory.UNDOCUMENTED,
+      effectTags = {OptionEffectTag.BAZEL_INTERNAL_CONFIGURATION},
+      help =
+          "With --canva_skycache_execution_values, also write the results of tests that passed."
+              + " A reader reports such a test as a cached pass when the declared sources and"
+              + " analysis inputs of its target are unchanged, without building the test's"
+              + " inputs or asking the remote cache. Experimental.")
+  public abstract boolean getTestResults();
 }

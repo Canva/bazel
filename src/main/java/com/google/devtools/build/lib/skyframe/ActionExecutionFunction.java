@@ -49,6 +49,7 @@ import com.google.devtools.build.lib.actions.DiscoveredInputsEvent;
 import com.google.devtools.build.lib.actions.FileArtifactValue;
 import com.google.devtools.build.lib.actions.InputMetadataProvider;
 import com.google.devtools.build.lib.actions.LostInputsActionExecutionException;
+import com.google.devtools.build.lib.actions.NotifyOnActionCacheHit;
 import com.google.devtools.build.lib.actions.OutputMetadataStore;
 import com.google.devtools.build.lib.actions.PackageRootResolver;
 import com.google.devtools.build.lib.actions.RichArtifactData;
@@ -180,19 +181,46 @@ public class ActionExecutionFunction implements SkyFunction {
     ActionLookupData actionLookupData = (ActionLookupData) skyKey.argument();
     RemoteAnalysisCacheReaderDepsProvider remoteCachingDependencies =
         cachingDependenciesSupplier.get();
-    if (remoteCachingDependencies.mode().isRetrievalEnabled()
-        && !remoteCachingDependencies.getSkycacheAnalysisOnly()
-        && ExecutionValueCaching.isEnabled()
-        && !skyframeActionExecutor.shouldSkipRetrieval(actionLookupData)) {
+    boolean retrieve =
+        remoteCachingDependencies.mode().isRetrievalEnabled()
+            && !remoteCachingDependencies.getSkycacheAnalysisOnly()
+            && ExecutionValueCaching.isEnabled()
+            && !skyframeActionExecutor.shouldSkipRetrieval(actionLookupData);
+    // The action to tell that its result was retrieved, if it is one that wants to know.
+    NotifyOnActionCacheHit toNotify = null;
+    if (retrieve && !actionLookupData.valueIsShareable()) {
+      // A runfiles tree, or an action that depends on the build id. No writer uploads their
+      // results, so there is nothing to look up, with one exception: a test that passed.
+      retrieve = false;
+      if (ExecutionValueCaching.testResultsEnabled()) {
+        Action unshareable =
+            ActionUtils.getActionForLookupData(
+                env, actionLookupData, /* crashIfActionOwnerMissing= */ false);
+        if (unshareable == null) {
+          return null;
+        }
+        if (unshareable instanceof NotifyOnActionCacheHit notify) {
+          toNotify = notify;
+          retrieve = true;
+        }
+      }
+    }
+    if (retrieve) {
       switch (retrieveRemoteSkyValue(
           actionLookupData, env, remoteCachingDependencies, InputDiscoveryState::new)) {
         case SkyValueRetriever.Restart unused:
           return null;
         case SkyValueRetriever.RetrievedValue v:
-          if (v.value() instanceof ActionExecutionValue retrieved) {
-            skyframeActionExecutor.createOutputDirectoriesOfRetrieved(retrieved);
+          if (!(v.value() instanceof ActionExecutionValue retrieved)) {
+            return v.value();
           }
-          return v.value();
+          if (toNotify == null
+              || skyframeActionExecutor.notifyResultRetrieved(toNotify, retrieved)) {
+            skyframeActionExecutor.createOutputDirectoriesOfRetrieved(retrieved);
+            return retrieved;
+          }
+          // The action declined the result: it runs as if nothing had been found.
+          break;
         case SkyValueRetriever.NoCachedData unused:
           break;
       }

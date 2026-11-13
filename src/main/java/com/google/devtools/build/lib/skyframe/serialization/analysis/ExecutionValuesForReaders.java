@@ -20,6 +20,11 @@ import com.google.devtools.build.lib.actions.FileStateType;
 import com.google.devtools.build.lib.skyframe.ActionExecutionValue;
 import com.google.devtools.build.lib.skyframe.ActionExecutionValue.WithRichData;
 import com.google.devtools.build.lib.skyframe.TreeArtifactValue;
+import com.google.devtools.build.lib.vfs.FileSystemUtils;
+import com.google.devtools.build.lib.vfs.Path;
+import com.google.devtools.build.lib.view.test.TestStatus.TestResultData;
+import com.google.protobuf.ExtensionRegistryLite;
+import java.io.IOException;
 import java.util.Map;
 import javax.annotation.Nullable;
 
@@ -44,12 +49,21 @@ import javax.annotation.Nullable;
  * the link back on disk when it takes the result, since an action that runs locally reads the link
  * rather than the metadata.
  *
+ * <p>A test's result is different in that the test action itself reads one of its outputs back:
+ * the cache status file, in which it keeps what it reports for a test it does not run again. A
+ * reader has no such file. So the content of that file is written into its metadata, and the
+ * reader's test action reports from there: see {@code TestRunnerAction#resultRetrieved}. Only the
+ * result of a test that passed is written, as only that is ever reused.
+ *
  * <p>Results this cannot be done for are left out, and a reader runs those actions itself.
  */
 final class ExecutionValuesForReaders {
 
   /** The location index Bazel gives a file in the remote cache. */
   private static final int REMOTE_CACHE_LOCATION = 1;
+
+  /** The name of the output in which a test action keeps its result: see TestRunnerAction. */
+  private static final String TEST_CACHE_STATUS = "test.cache_status";
 
   private ExecutionValuesForReaders() {}
 
@@ -60,6 +74,12 @@ final class ExecutionValuesForReaders {
       // A runfiles tree: its rich data holds the metadata of everything in the tree, source files
       // included, and the action is not shareable in the first place.
       return null;
+    }
+    Artifact testStatus = testStatusOutput(value);
+    if (testStatus != null) {
+      return ExecutionValueCaching.testResultsEnabled()
+          ? testResultForReader(value, testStatus)
+          : null;
     }
     for (TreeArtifactValue tree : value.getAllTreeArtifactValues().values()) {
       for (FileArtifactValue child : tree.getChildValues().values()) {
@@ -99,6 +119,83 @@ final class ExecutionValuesForReaders {
               ? file
               : FileArtifactValue.createForRemoteFile(
                   file.getDigest(), file.getSize(), REMOTE_CACHE_LOCATION));
+    }
+    return ActionExecutionValue.create(
+        files.buildOrThrow(),
+        value.getAllTreeArtifactValues(),
+        /* richArtifactData= */ null,
+        value.getDiscoveredModules());
+  }
+
+  /** Whether {@code value} is the result of a test action. */
+  static boolean isTestResult(ActionExecutionValue value) {
+    return testStatusOutput(value) != null;
+  }
+
+  @Nullable
+  private static Artifact testStatusOutput(ActionExecutionValue value) {
+    for (Artifact output : value.getAllFileValues().keySet()) {
+      if (output.getExecPath().getBaseName().equals(TEST_CACHE_STATUS)) {
+        return output;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Returns the result of a test as a reader should receive it, or null if the test did not pass
+   * or the result has to be left out for another reason.
+   */
+  @Nullable
+  private static ActionExecutionValue testResultForReader(
+      ActionExecutionValue value, Artifact testStatus) {
+    if (!ExecutionValueCaching.localResultsEnabled()) {
+      // The cache status file is always written locally.
+      return null;
+    }
+    for (TreeArtifactValue tree : value.getAllTreeArtifactValues().values()) {
+      for (FileArtifactValue child : tree.getChildValues().values()) {
+        if (!child.isRemote() && !child.isInline()) {
+          return null;
+        }
+      }
+    }
+    FileArtifactValue inlineStatus;
+    try {
+      Path path = testStatus.getPath();
+      byte[] content = FileSystemUtils.readContent(path);
+      TestResultData data = TestResultData.parseFrom(content, ExtensionRegistryLite.getEmptyRegistry());
+      if (!data.getCachable() || !data.getTestPassed()) {
+        return null;
+      }
+      inlineStatus =
+          FileArtifactValue.createForInlineFile(
+              content, path.getFileSystem().getDigestFunction().getHashFunction());
+    } catch (IOException e) {
+      // Missing, unreadable or not a status: nothing a reader could report from.
+      return null;
+    }
+    ImmutableMap.Builder<Artifact, FileArtifactValue> files =
+        ImmutableMap.builderWithExpectedSize(value.getAllFileValues().size());
+    for (Map.Entry<Artifact, FileArtifactValue> entry : value.getAllFileValues().entrySet()) {
+      FileArtifactValue file = entry.getValue();
+      if (entry.getKey().equals(testStatus)) {
+        files.put(testStatus, inlineStatus);
+      } else if (file.isRemote()
+          || file.isInline()
+          // The directory of the test's undeclared outputs. Nothing in a build reads it through
+          // its metadata, which says no more than that it is a directory.
+          || file.getType() == FileStateType.DIRECTORY) {
+        files.put(entry.getKey(), file);
+      } else if (isLocalRegularFile(file)) {
+        // The log, and the coverage data if there is any.
+        files.put(
+            entry.getKey(),
+            FileArtifactValue.createForRemoteFile(
+                file.getDigest(), file.getSize(), REMOTE_CACHE_LOCATION));
+      } else {
+        return null;
+      }
     }
     return ActionExecutionValue.create(
         files.buildOrThrow(),

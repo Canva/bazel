@@ -41,6 +41,8 @@ import com.google.devtools.build.lib.actions.CommandAction;
 import com.google.devtools.build.lib.actions.CommandLineExpansionException;
 import com.google.devtools.build.lib.actions.EnvironmentalExecException;
 import com.google.devtools.build.lib.actions.ExecException;
+import com.google.devtools.build.lib.actions.ExecutionRequirements;
+import com.google.devtools.build.lib.actions.FileArtifactValue;
 import com.google.devtools.build.lib.actions.InputMetadataProvider;
 import com.google.devtools.build.lib.actions.NotifyOnActionCacheHit;
 import com.google.devtools.build.lib.actions.SpawnExecutedEvent;
@@ -87,6 +89,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.function.Function;
 import java.util.function.Supplier;
 import javax.annotation.Nullable;
 
@@ -694,6 +697,59 @@ public class TestRunnerAction extends AbstractAction
           .handle(Event.warn(getErrorMessageOnNewCachedTestResultError(e.getMessage())));
       return false;
     }
+    return true;
+  }
+
+  /**
+   * Reports this test as a cached pass from a result taken from the remote analysis cache.
+   *
+   * <p>The writer of that result put the content of the cache status file in its metadata, because
+   * none of this action's outputs are on a reader's disk. Only a pass is taken, and only where a
+   * result from a remote cache would be: the conditions under which a test must run again are the
+   * same wherever the earlier result is kept.
+   *
+   * <p>The result is posted without its output files. The log of a test that passed is not shown,
+   * and the files that are not declared outputs of this action, the XML among them, have no
+   * metadata in the result at all.
+   */
+  @Override
+  public boolean resultRetrieved(
+      ActionCachedContext context, Function<Artifact, FileArtifactValue> outputMetadata) {
+    if (!shouldAcceptCachedResult()) {
+      return false;
+    }
+    Map<String, String> executionInfo = testProperties.getExecutionInfo();
+    if (executionInfo.containsKey(ExecutionRequirements.NO_CACHE)
+        || executionInfo.containsKey(ExecutionRequirements.LOCAL)
+        || executionInfo.containsKey(ExecutionRequirements.NO_REMOTE)
+        || executionInfo.containsKey(ExecutionRequirements.NO_REMOTE_CACHE)) {
+      return false;
+    }
+    FileArtifactValue status = outputMetadata.apply(cacheStatus);
+    if (status == null || !status.isInline()) {
+      return false;
+    }
+    TestResultData data;
+    try (InputStream in = status.getInputStream()) {
+      data = TestResultData.parseFrom(in, ExtensionRegistry.getEmptyRegistry());
+    } catch (IOException e) {
+      return false;
+    }
+    if (!data.getCachable() || !data.getTestPassed()) {
+      return false;
+    }
+    try {
+      context
+          .getEventHandler()
+          .post(
+              context
+                  .getContext(TestActionContext.class)
+                  .newCachedTestResult(
+                      context.getExecRoot(), this, data, ImmutableMultimap.of()));
+    } catch (IOException e) {
+      return false;
+    }
+    cachedTestResultData = Optional.of(data);
     return true;
   }
 

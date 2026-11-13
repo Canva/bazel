@@ -16,6 +16,7 @@ package com.google.devtools.build.lib.actions;
 
 import com.google.devtools.build.lib.events.ExtendedEventHandler;
 import com.google.devtools.build.lib.vfs.Path;
+import java.util.function.Function;
 
 /**
  * An action which must know when it is skipped due to an action cache hit.
@@ -51,4 +52,19 @@ public interface NotifyOnActionCacheHit extends Action {
    * @param context the action context for a cache hit
    */
   boolean actionCacheHit(ActionCachedContext context);
+
+  /**
+   * Called when the result of this action was taken from the remote analysis cache, so that the
+   * action neither ran nor was looked up in the action cache, and none of its outputs are on disk.
+   * Returns false if that result cannot stand in for running the action, and so the action must be
+   * executed.
+   *
+   * @param context the action context for a cache hit
+   * @param outputMetadata the metadata the retrieved result has for an output of this action, or
+   *     null if it has none
+   */
+  default boolean resultRetrieved(
+      ActionCachedContext context, Function<Artifact, FileArtifactValue> outputMetadata) {
+    return false;
+  }
 }

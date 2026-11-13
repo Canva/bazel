@@ -54,9 +54,11 @@ import com.google.devtools.build.lib.profiler.ProfilerTask;
 import com.google.devtools.build.lib.skyframe.ArtifactFunction.MissingArtifactValue;
 import com.google.devtools.build.lib.skyframe.ArtifactFunction.SourceArtifactException;
 import com.google.devtools.build.lib.skyframe.MetadataConsumerForMetrics.FilesMetricConsumer;
+import com.google.devtools.build.lib.skyframe.TargetCompletionValue.TargetCompletionKey;
 import com.google.devtools.build.lib.skyframe.rewinding.ActionRewindException;
 import com.google.devtools.build.lib.skyframe.rewinding.ActionRewindStrategy;
 import com.google.devtools.build.lib.skyframe.rewinding.ActionRewindStrategy.RewindPlanResult;
+import com.google.devtools.build.lib.skyframe.serialization.analysis.ExecutionValueCaching;
 import com.google.devtools.build.lib.util.DetailedExitCode;
 import com.google.devtools.build.lib.util.Pair;
 import com.google.devtools.build.skyframe.SkyFunction;
@@ -160,6 +162,19 @@ public final class CompletionFunction<
     ArtifactsToBuild artifactsToBuild = valueAndArtifactsToBuild.second;
 
     ImmutableList<Artifact> allArtifacts = artifactsToBuild.getAllArtifacts().toList();
+    if (ExecutionValueCaching.testResultsEnabled()
+        && key instanceof TargetCompletionKey targetKey
+        && targetKey.willTest()) {
+      // A target is built with its runfiles tree so that it can be run. This one is about to be
+      // run as a test, and the test action asks for the tree itself if it executes. If its result
+      // comes from the analysis cache it does not, and then nothing needs the tree: building it
+      // would mean obtaining the metadata of every file in it, which is most of what a cached
+      // test saves.
+      allArtifacts =
+          allArtifacts.stream()
+              .filter(artifact -> !artifact.isRunfilesTree())
+              .collect(ImmutableList.toImmutableList());
+    }
     SkyframeLookupResult inputDeps = env.getValuesAndExceptions(Artifact.keys(allArtifacts));
 
     boolean allArtifactsAreImportant = artifactsToBuild.areAllOutputGroupsImportant();

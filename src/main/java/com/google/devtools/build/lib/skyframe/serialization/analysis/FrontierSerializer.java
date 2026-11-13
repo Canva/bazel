@@ -504,8 +504,11 @@ public final class FrontierSerializer {
   private static boolean shouldUpload(ActionLookupData data, InMemoryNodeEntry node) {
     // Upstream also uploads the unshareable results that carry rich data (runfiles trees). Those
     // describe files a reader may not be able to obtain, so here a reader builds them itself.
-    return data.valueIsShareable()
-        && node.getValue() instanceof ActionExecutionValue value
+    //
+    // A test's result is not shareable either, because a test has to be evaluated in every build
+    // to be reported. A reader reports one it takes from the cache, so those are uploaded.
+    return node.getValue() instanceof ActionExecutionValue value
+        && (data.valueIsShareable() || ExecutionValuesForReaders.isTestResult(value))
         && ExecutionValuesForReaders.forReader(value) != null;
   }
 

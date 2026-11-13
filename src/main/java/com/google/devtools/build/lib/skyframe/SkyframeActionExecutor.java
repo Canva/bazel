@@ -450,6 +450,39 @@ public final class SkyframeActionExecutor {
             });
   }
 
+  /**
+   * Tells an action that reports its own cache hits, a test, that its result was taken from the
+   * analysis cache. Returns false if the action has to be executed after all.
+   */
+  boolean notifyResultRetrieved(NotifyOnActionCacheHit action, ActionExecutionValue value) {
+    ExtendedEventHandler contextEventHandler = selectEventHandler(action);
+    ArtifactPathResolver pathResolver =
+        ArtifactPathResolver.forExecRoot(executorEngine.getExecRoot());
+    ActionCachedContext context =
+        new ActionCachedContext() {
+          @Override
+          public ExtendedEventHandler getEventHandler() {
+            return contextEventHandler;
+          }
+
+          @Override
+          public Path getExecRoot() {
+            return executorEngine.getExecRoot();
+          }
+
+          @Override
+          public ArtifactPathResolver getPathResolver() {
+            return pathResolver;
+          }
+
+          @Override
+          public <T extends ActionContext> T getContext(Class<? extends T> type) {
+            return executorEngine.getContext(type);
+          }
+        };
+    return action.resultRetrieved(context, value.getAllFileValues()::get);
+  }
+
   /** As above, for an artifact whose own value, such as a tree's, came from the analysis cache. */
   void createOutputDirectoriesOfRetrieved(Artifact artifact) {
     createOutputDirectoriesOfRetrieved(ImmutableList.of(artifact));

@@ -53,4 +53,18 @@ public final class ExecutionValueCaching {
   public static boolean localResultsEnabled() {
     return localResults;
   }
+
+  private static volatile boolean testResults = false;
+
+  /**
+   * Sets whether the result of a test that passed is written too, and reported by a reader as a
+   * cached pass without building the test's inputs: see {@code ExecutionValuesForReaders}.
+   */
+  public static void setTestResultsEnabled(boolean testResults) {
+    ExecutionValueCaching.testResults = testResults;
+  }
+
+  public static boolean testResultsEnabled() {
+    return testResults;
+  }
 }
