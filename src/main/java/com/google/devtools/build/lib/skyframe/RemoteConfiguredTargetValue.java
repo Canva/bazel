@@ -18,16 +18,15 @@ import static com.google.common.base.Preconditions.checkNotNull;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
-import com.google.common.collect.Sets;
 import com.google.devtools.build.lib.actions.ActionAnalysisMetadata;
 import com.google.devtools.build.lib.actions.ActionLookupValue;
 import com.google.devtools.build.lib.analysis.ConfiguredTarget;
 import com.google.devtools.build.lib.analysis.ConfiguredTargetValue;
 import com.google.devtools.build.lib.analysis.configuredtargets.RuleConfiguredTarget;
 import com.google.devtools.build.lib.cmdline.Label;
+import com.google.devtools.build.lib.cmdline.RepositoryName;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
-import com.google.devtools.build.lib.collect.nestedset.Order;
 import com.google.devtools.build.lib.packages.NoSuchTargetException;
 import com.google.devtools.build.lib.packages.Package;
 import com.google.devtools.build.lib.packages.Target;
@@ -42,7 +41,8 @@ import com.google.protobuf.CodedInputStream;
 import com.google.protobuf.CodedOutputStream;
 import java.io.IOException;
 import java.util.ArrayDeque;
-import java.util.TreeMap;
+import java.util.ArrayList;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import javax.annotation.Nullable;
 
@@ -155,33 +155,40 @@ public sealed class RemoteConfiguredTargetValue
    * Reduces the transitive packages of a value to one package for each repository among them: see
    * {@link ConfiguredTargetValue#getTransitiveRepositoryPackages}.
    *
-   * <p>The transitive packages of the values of a build are nested sets that share most of their
-   * nodes, one node for a value, so the reduction of a node is computed once and kept. Values
-   * near each other reduce to the same few repositories, and equal results are one object, which
-   * is then serialized once.
+   * <p>The result keeps the shape of the set it was made from wherever that set adds a repository,
+   * and is the set of a dependency wherever it does not. Written as one flat list for each value,
+   * the same repositories were stored once for every value above them: 8.6 GB more for a build of
+   * 900,000 configured targets, read again by every reader. A nested set is stored node by node,
+   * each node once, and most targets of the main repository add no node of their own.
+   *
+   * <p>The transitive packages of the values of a build share most of their nodes, one node for a
+   * value, so the reduction of a node is computed once and kept.
    */
   private static final class RepositoryPackages {
-    private static final ConcurrentHashMap<NestedSet.Node, ImmutableList<Package.Metadata>> byNode =
+    private static final ConcurrentHashMap<NestedSet.Node, NestedSet<Package.Metadata>> byNode =
         new ConcurrentHashMap<>();
-    private static final ConcurrentHashMap<
-            ImmutableList<Package.Metadata>, ImmutableList<Package.Metadata>>
-        canonical = new ConcurrentHashMap<>();
-    private static final ConcurrentHashMap<
-            ImmutableList<Package.Metadata>, NestedSet<Package.Metadata>>
-        sets = new ConcurrentHashMap<>();
+
+    /**
+     * The package that stands for a repository: the first one seen. Which one it is makes no
+     * difference to a reader, which takes the repository's name and mapping from it.
+     */
+    private static final ConcurrentHashMap<RepositoryName, Package.Metadata> representatives =
+        new ConcurrentHashMap<>();
+
+    /** The reduced sets that hold the package standing for the main repository. */
+    private static final Set<NestedSet.Node> withMainRepository = ConcurrentHashMap.newKeySet();
 
     static void clear() {
       byNode.clear();
-      canonical.clear();
-      sets.clear();
+      representatives.clear();
+      withMainRepository.clear();
     }
 
-    static NestedSet<Package.Metadata> of(NestedSet<Package.Metadata> transitivePackages) {
-      return sets.computeIfAbsent(
-          reduce(transitivePackages), list -> NestedSetBuilder.wrap(Order.STABLE_ORDER, list));
-    }
-
-    private static ImmutableList<Package.Metadata> reduce(NestedSet<Package.Metadata> root) {
+    static NestedSet<Package.Metadata> of(NestedSet<Package.Metadata> root) {
+      NestedSet<Package.Metadata> done = byNode.get(root.toNode());
+      if (done != null) {
+        return done;
+      }
       // Children before parents, without recursion: these sets are as deep as the build graph.
       var pending = new ArrayDeque<NestedSet<Package.Metadata>>();
       pending.push(root);
@@ -193,45 +200,55 @@ public sealed class RemoteConfiguredTargetValue
           continue;
         }
         ImmutableList<NestedSet<Package.Metadata>> children = set.getNonLeaves();
-        boolean childrenDone = true;
+        var reducedChildren = new ArrayList<NestedSet<Package.Metadata>>(children.size());
         for (NestedSet<Package.Metadata> child : children) {
-          if (!byNode.containsKey(child.toNode())) {
+          NestedSet<Package.Metadata> reduced = byNode.get(child.toNode());
+          if (reduced == null) {
             pending.push(child);
-            childrenDone = false;
+          } else {
+            reducedChildren.add(reduced);
           }
         }
-        if (!childrenDone) {
+        if (reducedChildren.size() < children.size()) {
           continue;
         }
-        // Keyed by repository name, so that equal sets of repositories give equal lists.
-        var byRepository = new TreeMap<String, Package.Metadata>();
-        for (Package.Metadata pkg : set.getLeaves()) {
-          add(byRepository, pkg);
-        }
-        // Most children reduce to the same list as one of their siblings.
-        var merged = Sets.<ImmutableList<Package.Metadata>>newIdentityHashSet();
-        for (NestedSet<Package.Metadata> child : children) {
-          ImmutableList<Package.Metadata> reduced = byNode.get(child.toNode());
-          if (merged.add(reduced)) {
-            for (Package.Metadata pkg : reduced) {
-              add(byRepository, pkg);
-            }
+        // Nearly every target of the main repository has a dependency there. Adding the main
+        // repository's package at each of them would make a node of every one.
+        boolean mainRepositoryBelow = false;
+        for (NestedSet<Package.Metadata> reduced : reducedChildren) {
+          if (withMainRepository.contains(reduced.toNode())) {
+            mainRepositoryBelow = true;
+            break;
           }
         }
-        ImmutableList<Package.Metadata> result = ImmutableList.copyOf(byRepository.values());
-        ImmutableList<Package.Metadata> existing = canonical.putIfAbsent(result, result);
-        byNode.put(node, existing != null ? existing : result);
+        boolean hasMainRepository = mainRepositoryBelow;
+        NestedSetBuilder<Package.Metadata> builder = NestedSetBuilder.stableOrder();
+        for (NestedSet<Package.Metadata> reduced : reducedChildren) {
+          if (mainRepositoryBelow
+              && reduced.isSingleton()
+              && reduced.getSingleton().packageIdentifier().getRepository().isMain()) {
+            continue;
+          }
+          builder.addTransitive(reduced);
+        }
+        for (Package.Metadata pkg : set.getLeaves()) {
+          RepositoryName repository = pkg.packageIdentifier().getRepository();
+          if (repository.isMain()) {
+            if (mainRepositoryBelow) {
+              continue;
+            }
+            hasMainRepository = true;
+          }
+          builder.add(representatives.computeIfAbsent(repository, unused -> pkg));
+        }
+        NestedSet<Package.Metadata> result = builder.build();
+        if (hasMainRepository) {
+          withMainRepository.add(result.toNode());
+        }
+        byNode.putIfAbsent(node, result);
         pending.pop();
       }
       return byNode.get(root.toNode());
-    }
-
-    /** Keeps, of the packages of a repository, the one whose name sorts first. */
-    private static void add(TreeMap<String, Package.Metadata> byRepository, Package.Metadata pkg) {
-      byRepository.merge(
-          pkg.packageIdentifier().getRepository().getName(),
-          pkg,
-          (a, b) -> a.packageIdentifier().compareTo(b.packageIdentifier()) <= 0 ? a : b);
     }
   }
 
