@@ -144,14 +144,6 @@ public sealed class RemoteConfiguredTargetValue
   }
 
   /**
-   * Forgets what serializing values has memoized. To be called once a command that serialized
-   * values is over, so that the next one does not keep this one's packages alive.
-   */
-  public static void clearSerializationMemos() {
-    RepositoryPackages.clear();
-  }
-
-  /**
    * Reduces the transitive packages of a value to one package for each repository among them: see
    * {@link ConfiguredTargetValue#getTransitiveRepositoryPackages}.
    *
@@ -162,29 +154,25 @@ public sealed class RemoteConfiguredTargetValue
    * each node once, and most targets of the main repository add no node of their own.
    *
    * <p>The transitive packages of the values of a build share most of their nodes, one node for a
-   * value, so the reduction of a node is computed once and kept.
+   * value, so the reduction of a node is computed once and kept: in an instance of this class,
+   * which is a dependency of the codec and lives as long as one command's codecs. Kept for longer,
+   * it would hand a later build the packages of an earlier one.
    */
-  private static final class RepositoryPackages {
-    private static final ConcurrentHashMap<NestedSet.Node, NestedSet<Package.Metadata>> byNode =
+  public static final class RepositoryPackages {
+    private final ConcurrentHashMap<NestedSet.Node, NestedSet<Package.Metadata>> byNode =
         new ConcurrentHashMap<>();
 
     /**
      * The package that stands for a repository: the first one seen. Which one it is makes no
      * difference to a reader, which takes the repository's name and mapping from it.
      */
-    private static final ConcurrentHashMap<RepositoryName, Package.Metadata> representatives =
+    private final ConcurrentHashMap<RepositoryName, Package.Metadata> representatives =
         new ConcurrentHashMap<>();
 
     /** The reduced sets that hold the package standing for the main repository. */
-    private static final Set<NestedSet.Node> withMainRepository = ConcurrentHashMap.newKeySet();
+    private final Set<NestedSet.Node> withMainRepository = ConcurrentHashMap.newKeySet();
 
-    static void clear() {
-      byNode.clear();
-      representatives.clear();
-      withMainRepository.clear();
-    }
-
-    static NestedSet<Package.Metadata> of(NestedSet<Package.Metadata> root) {
+    NestedSet<Package.Metadata> of(NestedSet<Package.Metadata> root) {
       NestedSet<Package.Metadata> done = byNode.get(root.toNode());
       if (done != null) {
         return done;
@@ -298,7 +286,7 @@ public sealed class RemoteConfiguredTargetValue
       NestedSet<Package.Metadata> transitivePackages = obj.getTransitivePackages();
       context.serialize(
           transitivePackages != null
-              ? RepositoryPackages.of(transitivePackages)
+              ? context.getDependency(RepositoryPackages.class).of(transitivePackages)
               // Null unless this value was itself read from the cache.
               : obj.getTransitiveRepositoryPackages(),
           codedOut);

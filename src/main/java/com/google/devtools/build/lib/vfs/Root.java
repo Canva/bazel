@@ -370,7 +370,13 @@ public abstract class Root implements Comparable<Root> {
           }
         }
         codedOut.writeUInt32NoTag(PATH_ROOT);
-        PATH_ROOT_CODEC.serialize(context, root, codedOut);
+        try {
+          PATH_ROOT_CODEC.serialize(context, root, codedOut);
+        } catch (SerializationException e) {
+          // The message of a missing codec names classes only, and which root it was is what says
+          // why: one that is neither a likely root nor below a relocatable base.
+          throw new SerializationException("root " + root + ": " + e.getMessage(), e);
+        }
       } else if (root instanceof AbsoluteRoot) {
         codedOut.writeUInt32NoTag(ABSOLUTE_ROOT);
         ABSOLUTE_ROOT_CODEC.serialize(context, root, codedOut);

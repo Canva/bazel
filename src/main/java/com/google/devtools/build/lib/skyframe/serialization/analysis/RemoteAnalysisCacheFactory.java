@@ -56,6 +56,7 @@ import com.google.devtools.build.lib.server.FailureDetails.BuildConfiguration.Co
 import com.google.devtools.build.lib.server.FailureDetails.FailureDetail;
 import com.google.devtools.build.lib.server.FailureDetails.RemoteAnalysisCaching;
 import com.google.devtools.build.lib.skyframe.PrerequisitePackageFunction;
+import com.google.devtools.build.lib.skyframe.RemoteConfiguredTargetValue;
 import com.google.devtools.build.lib.skyframe.SkyfocusOptions;
 import com.google.devtools.build.lib.skyframe.SkyframeExecutor;
 import com.google.devtools.build.lib.skyframe.WorkspaceInfoFromDiff;
@@ -378,6 +379,9 @@ public final class RemoteAnalysisCacheFactory {
             .put(PackagePathCodecDependencies.class, skyframeExecutor::getPackagePathEntries)
             // This is needed to determine TargetData for a ConfiguredTarget during serialization.
             .put(PrerequisitePackageFunction.class, skyframeExecutor::getExistingPackage)
+            .put(
+                RemoteConfiguredTargetValue.RepositoryPackages.class,
+                new RemoteConfiguredTargetValue.RepositoryPackages())
             .put(PlatformConfigurationProvider.class, platformConfigurationProvider)
             .put(BuildOptions.class, topLevelOptions);
 

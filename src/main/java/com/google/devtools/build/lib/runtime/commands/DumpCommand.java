@@ -63,6 +63,7 @@ import com.google.devtools.build.lib.skyframe.BzlLoadValue;
 import com.google.devtools.build.lib.skyframe.ConfiguredTargetKey;
 import com.google.devtools.build.lib.skyframe.PrecomputedValue;
 import com.google.devtools.build.lib.skyframe.PrerequisitePackageFunction;
+import com.google.devtools.build.lib.skyframe.RemoteConfiguredTargetValue;
 import com.google.devtools.build.lib.skyframe.SkyFunctions;
 import com.google.devtools.build.lib.skyframe.SkyKeyStats;
 import com.google.devtools.build.lib.skyframe.SkyframeExecutor;
@@ -1187,6 +1188,9 @@ public class DumpCommand implements BlazeCommand {
     serializationDeps
         .put(PackagePathCodecDependencies.class, () -> skyframeExecutor.getPackagePathEntries())
         .put(PrerequisitePackageFunction.class, skyframeExecutor::getExistingPackage)
+        .put(
+            RemoteConfiguredTargetValue.RepositoryPackages.class,
+            new RemoteConfiguredTargetValue.RepositoryPackages())
         .put(
             ArtifactSerializationContext.class,
             skyframeExecutor.getSkyframeBuildView().getArtifactFactory()::getSourceArtifact);

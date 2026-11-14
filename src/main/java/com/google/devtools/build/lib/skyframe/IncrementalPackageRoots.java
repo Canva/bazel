@@ -354,11 +354,22 @@ public class IncrementalPackageRoots implements PackageRoots {
       if (isExternalRepository(pkgId)) {
         threadSafeExternalRepoPackageRootsMap.putIfAbsent(
             pkg.packageIdentifier(), pkg.sourceRoot());
-        SymlinkForest.plantSingleSymlinkForExternalRepo(
-            pkgId.getRepository(),
-            pkg.sourceRoot().asPath(),
-            execroot,
-            lazilyPlantedSymlinksRef);
+        try {
+          SymlinkForest.plantSingleSymlinkForExternalRepo(
+              pkgId.getRepository(),
+              pkg.sourceRoot().asPath(),
+              execroot,
+              lazilyPlantedSymlinksRef);
+        } catch (IOException e) {
+          // A reader of the analysis cache also links a repository when it deserializes a source
+          // artifact of it, and a target analyzed here can have that repository below a cached
+          // dependency. Either may come first; the link is the same.
+          Path link = execroot.getRelative(pkgId.getRepository().getExecPath());
+          if (!link.isSymbolicLink()
+              || !link.readSymbolicLink().equals(pkg.sourceRoot().asPath().asFragment())) {
+            throw e;
+          }
+        }
       } else if (!maybeConflictingBaseNamesLowercase.isEmpty()) {
         String originalBaseName = pkgId.getTopLevelDir();
         String baseNameLowercase = Ascii.toLowerCase(originalBaseName);

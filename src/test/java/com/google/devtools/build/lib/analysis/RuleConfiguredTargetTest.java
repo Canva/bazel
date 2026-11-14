@@ -34,6 +34,7 @@ import com.google.devtools.build.lib.compress.CompressionServiceImpl;
 import com.google.devtools.build.lib.events.Event;
 import com.google.devtools.build.lib.packages.RuleClassProvider;
 import com.google.devtools.build.lib.skyframe.PrerequisitePackageFunction;
+import com.google.devtools.build.lib.skyframe.RemoteConfiguredTargetValue;
 import com.google.devtools.build.lib.skyframe.serialization.FingerprintValueService;
 import com.google.devtools.build.lib.skyframe.serialization.ObjectCodecs;
 import com.google.devtools.build.lib.skyframe.serialization.PlatformConfigurationProvider;
@@ -803,6 +804,9 @@ public final class RuleConfiguredTargetTest extends BuildViewTestCase {
                     .put(
                         PrerequisitePackageFunction.class,
                         getSkyframeExecutor()::getExistingPackage)
+                    .put(
+                        RemoteConfiguredTargetValue.RepositoryPackages.class,
+                        new RemoteConfiguredTargetValue.RepositoryPackages())
                     .put(
                         BuildOptions.class,
                         BuildOptions.getDefaultBuildOptionsForFragments(
