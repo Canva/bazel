@@ -42,6 +42,7 @@ import com.google.devtools.build.lib.vfs.FileStatusWithDigest;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.devtools.build.lib.vfs.Root;
+import com.google.devtools.build.lib.vfs.Root.RootCodecDependencies;
 import com.google.devtools.build.lib.vfs.Symlinks;
 import com.google.devtools.build.lib.vfs.SyscallCache;
 import com.google.devtools.build.lib.vfs.XattrProvider;
@@ -1122,8 +1123,27 @@ public abstract class FileArtifactValue implements SkyValue, FileArtifactMetadat
           return;
         }
       }
-      throw new SerializationException(resolvedPath + " is not under any package roots: " + roots);
+      // A link to another output, or to a file of an external repository: both are in the output
+      // base, which a reader has somewhere else. Left out, every action with such an output (an
+      // image layout whose blobs link to its layers, a link to a file of an external repository)
+      // was run again by each reader.
+      ImmutableList<Path> bases =
+          context.getDependency(RootCodecDependencies.class).relocatableBases();
+      for (int i = 0; i < bases.size() && i < RELOCATED; i++) {
+        PathFragment base = bases.get(i).asFragment();
+        if (resolvedPath.startsWith(base)) {
+          context.serializeLeaf(resolvedPath.relativeTo(base), pathFragmentCodec(), codedOut);
+          codedOut.write((byte) (RELOCATED | i));
+          context.serialize(obj.delegate, codedOut);
+          return;
+        }
+      }
+      throw new SerializationException(
+          resolvedPath + " is not under any package roots: " + roots + " or bases: " + bases);
     }
+
+    /** Set in the root index of a path written relative to a relocatable base. */
+    private static final int RELOCATED = 0x40;
 
     @Override
     public DeferredValue<ResolvedSymlinkArtifactValue> deserializeDeferred(
@@ -1131,12 +1151,24 @@ public abstract class FileArtifactValue implements SkyValue, FileArtifactMetadat
         throws SerializationException, IOException {
       PathFragment relativePath = context.deserializeLeaf(codedIn, pathFragmentCodec());
       int rootIndex = codedIn.readRawByte();
-      Root root =
-          context
-              .getDependency(PackagePathCodecDependencies.class)
-              .getPackageRoots()
-              .get(rootIndex);
-      PathFragment resolvedPath = root.getRelative(relativePath).asFragment();
+      PathFragment resolvedPath;
+      if ((rootIndex & RELOCATED) != 0) {
+        ImmutableList<Path> bases =
+            context.getDependency(RootCodecDependencies.class).relocatableBases();
+        int baseIndex = rootIndex & ~RELOCATED;
+        if (baseIndex >= bases.size()) {
+          throw new SerializationException(
+              "relocatable base " + baseIndex + " is not among " + bases);
+        }
+        resolvedPath = bases.get(baseIndex).getRelative(relativePath).asFragment();
+      } else {
+        Root root =
+            context
+                .getDependency(PackagePathCodecDependencies.class)
+                .getPackageRoots()
+                .get(rootIndex);
+        resolvedPath = root.getRelative(relativePath).asFragment();
+      }
 
       Builder builder = new Builder(resolvedPath);
       context.deserialize(codedIn, builder, Builder::setDelegate);

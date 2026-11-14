@@ -264,6 +264,14 @@ public abstract class Root implements Comparable<Root> {
     private final ImmutableList<Root> likelyPopularRoots;
     private final ImmutableList<Path> relocatableBases;
 
+    /**
+     * The directories whose content a reader has under a different path, such as the output base.
+     * A path below one of them is written relative to it.
+     */
+    public ImmutableList<Path> relocatableBases() {
+      return relocatableBases;
+    }
+
     /** Convenience constructor for an instance with no likely roots. */
     public RootCodecDependencies() {
       this(ImmutableList.of());
