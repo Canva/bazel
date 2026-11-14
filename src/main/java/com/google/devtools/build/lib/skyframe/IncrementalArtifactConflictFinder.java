@@ -45,7 +45,9 @@ import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.devtools.build.skyframe.SkyKey;
 import com.google.devtools.build.skyframe.SkyValue;
 import com.google.devtools.build.skyframe.WalkableGraph;
+import java.util.ArrayList;
 import java.util.Collection;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.Set;
 import java.util.concurrent.Callable;
@@ -83,6 +85,9 @@ public final class IncrementalArtifactConflictFinder {
   // The common lock for the portions of the process where top level targets need to be processed
   // exclusively.
   private final Object exclusivePortionLock = new Object();
+
+  /** The most keys in a transitive closure that {@link #checkSmallClosure} checks. */
+  private static final int SMALL_CLOSURE = 64;
 
   public IncrementalArtifactConflictFinder(
       MutableActionGraph threadSafeMutableActionGraph, WalkableGraph walkableGraph) {
@@ -231,6 +236,12 @@ public final class IncrementalArtifactConflictFinder {
    */
   ActionConflictsAndStats findArtifactConflicts(ActionLookupKey actionLookupKey, boolean inRerun)
       throws InterruptedException {
+    if (!inRerun) {
+      ActionConflictsAndStats small = checkSmallClosure(actionLookupKey);
+      if (small != null) {
+        return small;
+      }
+    }
     ConcurrentMap<ActionAnalysisMetadata, ActionConflictException> temporaryBadActionMap =
         new ConcurrentHashMap<>();
 
@@ -297,6 +308,57 @@ public final class IncrementalArtifactConflictFinder {
 
     return ActionConflictsAndStats.create(
         ImmutableMap.copyOf(temporaryBadActionMap), threadSafeMutableActionGraph.getSize());
+  }
+
+  /**
+   * Checks a top-level key whose transitive closure holds at most {@link #SMALL_CLOSURE} keys on
+   * the calling thread, without taking a turn in the sequence described above. Returns null for
+   * a larger one.
+   *
+   * <p>The sequence costs a hand-off to another thread and back under a lock for every top-level
+   * key, however little there is under it. A build that takes its analysis from a remote cache
+   * has over a million top-level targets and aspects with nothing under them but themselves, and
+   * was paced by that lock alone.
+   *
+   * <p>Nothing here depends on the sequence. The closure is neither pruned by the keys other
+   * top-level keys have visited nor added to them, so every action in it is registered before
+   * this returns, and no other key skips one on the strength of this visit. Registering an action
+   * a second time is harmless, as in a rerun. If two actions conflict, the one registered second
+   * fails, whichever path registered either.
+   */
+  @Nullable
+  private ActionConflictsAndStats checkSmallClosure(ActionLookupKey root)
+      throws InterruptedException {
+    ArrayList<ActionLookupKey> closure = new ArrayList<>();
+    closure.add(root);
+    Set<ActionLookupKey> seen = new HashSet<>();
+    seen.add(root);
+    ArrayList<ActionLookupValue> values = new ArrayList<>();
+    for (int i = 0; i < closure.size(); i++) {
+      ActionLookupKey key = closure.get(i);
+      SkyValue value = walkableGraph.getValue(key);
+      if (value == null) { // The value failed to evaluate.
+        continue;
+      }
+      for (SkyKey dep : walkableGraph.getDirectDeps(key)) {
+        if (dep instanceof ActionLookupKey depKey && seen.add(depKey)) {
+          if (seen.size() > SMALL_CLOSURE) {
+            return null;
+          }
+          closure.add(depKey);
+        }
+      }
+      if (value instanceof ActionLookupValue actionLookupValue) {
+        values.add(actionLookupValue);
+      }
+    }
+    ConcurrentMap<ActionAnalysisMetadata, ActionConflictException> badActionMap =
+        new ConcurrentHashMap<>();
+    for (ActionLookupValue value : values) {
+      actionRegistration(value, threadSafeMutableActionGraph, pathFragmentTrieRoot, badActionMap);
+    }
+    return ActionConflictsAndStats.create(
+        ImmutableMap.copyOf(badActionMap), threadSafeMutableActionGraph.getSize());
   }
 
   void shutdown() {
