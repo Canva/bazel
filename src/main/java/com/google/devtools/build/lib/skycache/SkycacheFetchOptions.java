@@ -69,4 +69,18 @@ public abstract class SkycacheFetchOptions extends OptionsBase {
               + " analysis inputs of its target are unchanged, without building the test's"
               + " inputs or asking the remote cache. Experimental.")
   public abstract boolean getTestResults();
+
+  @Option(
+      name = "canva_skycache_completions",
+      defaultValue = "false",
+      documentationCategory = OptionDocumentationCategory.UNDOCUMENTED,
+      effectTags = {OptionEffectTag.BAZEL_INTERNAL_CONFIGURATION},
+      help =
+          "With --canva_skycache_execution_values, also record each top-level target and aspect"
+              + " that was built completely. A reader reports one as built when the declared"
+              + " sources and analysis inputs below it are unchanged, without asking for any of"
+              + " its artifacts: its build event lists no output files and none of its outputs"
+              + " are downloaded. For builds that check that everything builds and passes."
+              + " Experimental.")
+  public abstract boolean getCompletions();
 }

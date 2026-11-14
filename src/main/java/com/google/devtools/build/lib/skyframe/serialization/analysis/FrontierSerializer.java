@@ -51,6 +51,8 @@ import com.google.devtools.build.lib.server.FailureDetails.RemoteAnalysisCaching
 import com.google.devtools.build.lib.skyframe.ActionExecutionValue;
 import com.google.devtools.build.lib.skyframe.ActionTemplateExpansionValue.ActionTemplateExpansionKey;
 import com.google.devtools.build.lib.skyframe.BzlLoadValue;
+import com.google.devtools.build.lib.skyframe.SkyFunctions;
+import com.google.devtools.build.lib.skyframe.TopLevelActionLookupKeyWrapper;
 import com.google.devtools.build.lib.skyframe.serialization.FingerprintValueService;
 import com.google.devtools.build.lib.skyframe.serialization.FrontierNodeVersion;
 import com.google.devtools.build.lib.skyframe.serialization.KeyValueWriter;
@@ -64,6 +66,7 @@ import com.google.devtools.build.skyframe.InMemoryGraph;
 import com.google.devtools.build.skyframe.InMemoryNodeEntry;
 import com.google.devtools.build.skyframe.IncrementalInMemoryNodeEntry;
 import com.google.devtools.build.skyframe.MemoizingEvaluator;
+import com.google.devtools.build.skyframe.SkyFunctionName;
 import com.google.devtools.build.skyframe.SkyKey;
 import com.google.devtools.build.skyframe.SkyValue;
 import java.io.BufferedOutputStream;
@@ -233,12 +236,12 @@ public final class FrontierSerializer {
                   serializationStats.analysisNodes(),
                   serializationStats.executionNodes(),
                   stopwatch,
-                  serializationStats.unversionedNodes() == 0
-                      ? ""
-                      : String.format(
-                          "; left out %s that depend on changes newer than the version they would"
-                              + " be keyed at",
-                          serializationStats.unversionedNodes())
+                  (serializationStats.unversionedNodes() == 0
+                          ? ""
+                          : String.format(
+                              "; left out %s that depend on changes newer than the version they"
+                                  + " would be keyed at",
+                              serializationStats.unversionedNodes()))
                       + (serializationStats.unserializableExecutionNodes() == 0
                           ? ""
                           : String.format(
@@ -392,6 +395,12 @@ public final class FrontierSerializer {
                 selection.putIfAbsent(data, FRONTIER_CANDIDATE);
               }
             }
+            case TopLevelActionLookupKeyWrapper completion
+                when !skycacheAnalysisOnly && traversalMode == TraversalMode.FOR_SERIALIZATION -> {
+              if (isCompleted(completion, node)) {
+                selection.putIfAbsent(completion, FRONTIER_CANDIDATE);
+              }
+            }
             case Artifact artifact
                 when !skycacheAnalysisOnly && traversalMode == TraversalMode.FOR_SERIALIZATION -> {
               SkyKey artifactKey = selectArtifactKey(artifact);
@@ -459,6 +468,12 @@ public final class FrontierSerializer {
               if (data.getActionLookupKey().getLabel() != null
                   && shouldUpload(data, node, graph, leftOut)) {
                 selection.putIfAbsent(data, FRONTIER_CANDIDATE);
+              }
+            }
+            case TopLevelActionLookupKeyWrapper completion
+                when !skycacheAnalysisOnly && traversalMode == TraversalMode.FOR_SERIALIZATION -> {
+              if (isCompleted(completion, node)) {
+                selection.putIfAbsent(completion, FRONTIER_CANDIDATE);
               }
             }
             case Artifact artifact
@@ -542,6 +557,27 @@ public final class FrontierSerializer {
     }
     leftOut.add(mnemonic(data, graph) + ": " + reason[0], data::toString);
     return false;
+  }
+
+  /**
+   * Whether {@code node} is a top-level target or aspect that this build completed, to be recorded
+   * for readers: see {@link CompletedTopLevelKey}.
+   */
+  private static boolean isCompleted(
+      TopLevelActionLookupKeyWrapper completion, InMemoryNodeEntry node) {
+    if (!ExecutionValueCaching.completionsEnabled()
+        || completion.actionLookupKey().getLabel() == null
+        || !node.isDone()) {
+      return false;
+    }
+    SkyFunctionName function = completion.functionName();
+    if (!function.equals(SkyFunctions.TARGET_COMPLETION)
+        && !function.equals(SkyFunctions.ASPECT_COMPLETION)) {
+      // The key that drives the build of a top-level target wraps one too.
+      return false;
+    }
+    // Null if the target failed to build.
+    return node.getValue() != null;
   }
 
   /** The mnemonic of the action {@code data} is the result of, for a message. */

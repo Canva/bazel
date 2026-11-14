@@ -75,6 +75,43 @@ public final class ExecutionValueCaching {
     return testResults;
   }
 
+  private static volatile boolean completions = false;
+
+  /**
+   * Sets whether a writer records the top-level targets and aspects it built completely, and a
+   * reader reports one whose record is valid as built without asking for its artifacts: see
+   * {@code CompletedTopLevelKey}.
+   */
+  public static void setCompletionsEnabled(boolean completions) {
+    ExecutionValueCaching.completions = completions;
+  }
+
+  public static boolean completionsEnabled() {
+    return completions;
+  }
+
+  private static final ConcurrentHashMap<String, LongAdder> completionOutcomes =
+      new ConcurrentHashMap<>();
+  private static final Set<Object> completionsNoted = ConcurrentHashMap.newKeySet();
+
+  /**
+   * Counts what became of a reader's attempt to take a completed target or aspect from the cache.
+   * Counted once for a key, since the function that asks is restarted.
+   */
+  public static void noteCompletion(String outcome, Object key) {
+    if (completionsNoted.add(key)) {
+      completionOutcomes.computeIfAbsent(outcome, unused -> new LongAdder()).increment();
+    }
+  }
+
+  /** The outcomes counted since the last reset, as "N outcome, M outcome", or empty. */
+  public static String completionOutcomes() {
+    return completionOutcomes.entrySet().stream()
+        .sorted(java.util.Map.Entry.comparingByKey())
+        .map(e -> e.getValue().sum() + " " + e.getKey())
+        .collect(Collectors.joining(", "));
+  }
+
   private static final ConcurrentHashMap<String, LongAdder> testResultOutcomes =
       new ConcurrentHashMap<>();
   private static final Set<Object> testResultsNoted = ConcurrentHashMap.newKeySet();
@@ -131,6 +168,8 @@ public final class ExecutionValueCaching {
   }
 
   public static void resetTestResultOutcomes() {
+    completionOutcomes.clear();
+    completionsNoted.clear();
     testResultOutcomes.clear();
     testResultsNoted.clear();
     actionsRun.clear();

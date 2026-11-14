@@ -3514,6 +3514,7 @@ java_library(
     name = "aspect_completor",
     srcs = ["AspectCompletor.java"],
     deps = [
+        "//src/main/java/com/google/devtools/build/lib/skyframe/serialization/analysis:dependencies_provider",
         ":aspect_completion_value",
         ":aspect_key_creator",
         ":completion_function",
@@ -3541,6 +3542,11 @@ java_library(
     srcs = ["CompletionFunction.java"],
     deps = [
         ":action_execution_function",
+        ":precomputed_value",
+        ":skyvalue_retriever_utils",
+        "//src/main/java/com/google/devtools/build/lib/skyframe/serialization:skyvalue_retriever",
+        "//src/main/java/com/google/devtools/build/lib/skyframe/serialization/analysis:dependencies_provider",
+        "//src/main/java/com/google/devtools/build/lib/skyframe/serialization/analysis:frontier_serializer",
         ":action_input_map_helper",
         ":action_input_metadata_provider",
         ":artifact_function",
@@ -3796,6 +3802,7 @@ java_library(
     name = "target_completor",
     srcs = ["TargetCompletor.java"],
     deps = [
+        "//src/main/java/com/google/devtools/build/lib/skyframe/serialization/analysis:dependencies_provider",
         ":completion_function",
         ":configured_target_and_data",
         ":metadata_consumer_for_metrics",

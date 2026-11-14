@@ -32,9 +32,11 @@ import com.google.devtools.build.lib.skyframe.AspectCompletionValue.AspectComple
 import com.google.devtools.build.lib.skyframe.AspectKeyCreator.AspectKey;
 import com.google.devtools.build.lib.skyframe.CompletionFunction.Completor;
 import com.google.devtools.build.lib.skyframe.rewinding.ActionRewindStrategy;
+import com.google.devtools.build.lib.skyframe.serialization.analysis.RemoteAnalysisCacheReaderDepsProvider;
 import com.google.devtools.build.skyframe.SkyFunction;
 import com.google.devtools.build.skyframe.SkyFunction.Environment;
 
+import java.util.function.Supplier;
 /** Manages completing builds for aspects. */
 final class AspectCompletor
     implements Completor<AspectValue, AspectCompletionValue, AspectCompletionKey> {
@@ -44,14 +46,16 @@ final class AspectCompletor
       SkyframeActionExecutor skyframeActionExecutor,
       MetadataConsumerForMetrics.FilesMetricConsumer topLevelArtifactsMetric,
       ActionRewindStrategy actionRewindStrategy,
-      BugReporter bugReporter) {
+      BugReporter bugReporter,
+      Supplier<RemoteAnalysisCacheReaderDepsProvider> cachingDependenciesSupplier) {
     return new CompletionFunction<>(
         pathResolverFactory,
         new AspectCompletor(),
         skyframeActionExecutor,
         topLevelArtifactsMetric,
         actionRewindStrategy,
-        bugReporter);
+        bugReporter,
+        cachingDependenciesSupplier);
   }
 
   @Override

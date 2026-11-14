@@ -93,6 +93,14 @@ public final class TopLevelArtifactHelper {
       this.allOutputGroupsImportant = allOutputGroupsImportant;
     }
 
+    /**
+     * No artifacts at all: what there is to say about the outputs of a target that is known to be
+     * built without its artifacts having been looked at.
+     */
+    public static ArtifactsToBuild none() {
+      return new ArtifactsToBuild(ImmutableMap.of(), /* allOutputGroupsImportant= */ true);
+    }
+
     /** Returns the artifacts that the user should know about. */
     public NestedSet<Artifact> getImportantArtifacts() {
       NestedSetBuilder<Artifact> builder = NestedSetBuilder.stableOrder();

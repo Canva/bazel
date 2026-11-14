@@ -31,6 +31,7 @@ import com.google.devtools.build.lib.skyframe.serialization.SkyValueRetriever.Re
 import com.google.devtools.build.lib.skyframe.serialization.SkyValueRetriever.RetrievedValue;
 import com.google.devtools.build.lib.skyframe.serialization.SkyValueRetriever.SerializableSkyKeyComputeState;
 import com.google.devtools.build.lib.skyframe.serialization.analysis.AnalysisValueWithMtsv;
+import com.google.devtools.build.lib.skyframe.serialization.analysis.CompletedTopLevelKey;
 import com.google.devtools.build.lib.skyframe.serialization.analysis.RemoteAnalysisCacheClient;
 import com.google.devtools.build.lib.skyframe.serialization.analysis.RemoteAnalysisCacheReaderDepsProvider;
 import com.google.devtools.build.lib.skyframe.serialization.analysis.SkycacheUploadClient;
@@ -68,6 +69,7 @@ public final class SkyValueRetrieverUtils {
           case ActionLookupData ald -> ald.getLabel();
           case ActionLookupSummaryKey summaryKey -> summaryKey.argument().getLabel();
           case Artifact artifact -> artifact.getOwnerLabel();
+          case CompletedTopLevelKey completed -> completed.owner().getLabel();
           default -> throw new IllegalStateException("unexpected key: " + key.getCanonicalName());
         };
 

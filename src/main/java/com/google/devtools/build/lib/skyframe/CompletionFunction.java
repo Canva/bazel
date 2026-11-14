@@ -15,6 +15,7 @@ package com.google.devtools.build.lib.skyframe;
 
 import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.base.Preconditions.checkState;
+import static com.google.devtools.build.lib.skyframe.SkyValueRetrieverUtils.retrieveRemoteSkyValue;
 
 import com.google.common.collect.ImmutableCollection;
 import com.google.common.collect.ImmutableList;
@@ -58,7 +59,12 @@ import com.google.devtools.build.lib.skyframe.TargetCompletionValue.TargetComple
 import com.google.devtools.build.lib.skyframe.rewinding.ActionRewindException;
 import com.google.devtools.build.lib.skyframe.rewinding.ActionRewindStrategy;
 import com.google.devtools.build.lib.skyframe.rewinding.ActionRewindStrategy.RewindPlanResult;
+import com.google.devtools.build.lib.skyframe.serialization.SkyValueRetriever;
+import com.google.devtools.build.lib.skyframe.serialization.SkyValueRetriever.RetrievalContext;
+import com.google.devtools.build.lib.skyframe.serialization.SkyValueRetriever.SerializableSkyKeyComputeState;
+import com.google.devtools.build.lib.skyframe.serialization.analysis.CompletedTopLevelKey;
 import com.google.devtools.build.lib.skyframe.serialization.analysis.ExecutionValueCaching;
+import com.google.devtools.build.lib.skyframe.serialization.analysis.RemoteAnalysisCacheReaderDepsProvider;
 import com.google.devtools.build.lib.util.DetailedExitCode;
 import com.google.devtools.build.lib.util.Pair;
 import com.google.devtools.build.skyframe.SkyFunction;
@@ -68,6 +74,7 @@ import com.google.devtools.build.skyframe.SkyValue;
 import com.google.devtools.build.skyframe.SkyframeLookupResult;
 import java.util.HashSet;
 import java.util.Set;
+import java.util.function.Supplier;
 import javax.annotation.Nullable;
 import net.starlark.java.syntax.Location;
 
@@ -132,6 +139,7 @@ public final class CompletionFunction<
   private final FilesMetricConsumer topLevelArtifactsMetric;
   private final ActionRewindStrategy actionRewindStrategy;
   private final BugReporter bugReporter;
+  private final Supplier<RemoteAnalysisCacheReaderDepsProvider> cachingDependenciesSupplier;
 
   CompletionFunction(
       PathResolverFactory pathResolverFactory,
@@ -139,7 +147,9 @@ public final class CompletionFunction<
       SkyframeActionExecutor skyframeActionExecutor,
       FilesMetricConsumer topLevelArtifactsMetric,
       ActionRewindStrategy actionRewindStrategy,
-      BugReporter bugReporter) {
+      BugReporter bugReporter,
+      Supplier<RemoteAnalysisCacheReaderDepsProvider> cachingDependenciesSupplier) {
+    this.cachingDependenciesSupplier = checkNotNull(cachingDependenciesSupplier);
     this.pathResolverFactory = checkNotNull(pathResolverFactory);
     this.completor = checkNotNull(completor);
     this.skyframeActionExecutor = checkNotNull(skyframeActionExecutor);
@@ -160,6 +170,51 @@ public final class CompletionFunction<
     }
     ValueT value = valueAndArtifactsToBuild.first;
     ArtifactsToBuild artifactsToBuild = valueAndArtifactsToBuild.second;
+
+    if (ExecutionValueCaching.completionsEnabled() && ExecutionValueCaching.isEnabled()) {
+      RemoteAnalysisCacheReaderDepsProvider cachingDependencies = cachingDependenciesSupplier.get();
+      if (cachingDependencies.mode().isRetrievalEnabled()
+          && !cachingDependencies.getSkycacheAnalysisOnly()) {
+        // A writer records each target and aspect it built completely. If the record of this one
+        // is valid, building its artifacts again would run the same actions on the same inputs,
+        // so it is reported as built without asking for one of them. The event then has no
+        // artifacts to list and nothing is handed to the important output handler: see
+        // CompletedTopLevelKey for what that is good for.
+        CompletedTopLevelKey completed =
+            CompletedTopLevelKey.of(
+                key.actionLookupKey(),
+                key.topLevelArtifactContext(),
+                key instanceof TargetCompletionKey targetKey && targetKey.willTest());
+        switch (retrieveRemoteSkyValue(
+            completed, env, cachingDependencies, CompletedRetrievalState::new)) {
+          case SkyValueRetriever.Restart unused:
+            return null;
+          case SkyValueRetriever.RetrievedValue unused:
+            // The record is valid for the sources as they are now. Nothing in the graph ties
+            // this value to them: its only dependency is the target, which stays valid when a
+            // source changes. So make it depend on the build, and look the record up again in
+            // every build that asks for this target.
+            PrecomputedValue.BUILD_ID.get(env);
+            if (env.valuesMissing()) {
+              return null;
+            }
+            Postable event =
+                completor.createSucceeded(
+                    key,
+                    value,
+                    CompletionContext.create(new ActionInputMap(0), pathResolverFactory),
+                    ArtifactsToBuild.none(),
+                    env);
+            checkStored(event, key);
+            env.getListener().post(event);
+            ExecutionValueCaching.noteCompletion("taken from the cache", key);
+            return completor.getResult();
+          case SkyValueRetriever.NoCachedData unused:
+            ExecutionValueCaching.noteCompletion("not cached", key);
+            break;
+        }
+      }
+    }
 
     ImmutableList<Artifact> allArtifacts = artifactsToBuild.getAllArtifacts().toList();
     if (ExecutionValueCaching.testResultsEnabled()
@@ -460,6 +515,16 @@ public final class CompletionFunction<
       postFailedEvent(key, value, rootCauses, ctx, artifactsToBuild, builtArtifacts, env);
       throw new CompletionFunctionException(
           new TopLevelOutputException(e.getMessage(), e.getDetailedExitCode()));
+    }
+  }
+
+  /** What a lookup of a {@link CompletedTopLevelKey} keeps between restarts. */
+  private static final class CompletedRetrievalState implements SerializableSkyKeyComputeState {
+    private final RetrievalContext retrievalContext = new RetrievalContext();
+
+    @Override
+    public RetrievalContext getRetrievalContext() {
+      return retrievalContext;
     }
   }
 

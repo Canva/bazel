@@ -202,6 +202,11 @@ public final class SkycacheModule extends SerializationModule {
         fetchOptions == null || fetchOptions.getLocalActionResults());
     ExecutionValueCaching.setTestResultsEnabled(
         enabled && fetchOptions != null && fetchOptions.getTestResults());
+    ExecutionValueCaching.setCompletionsEnabled(
+        enabled
+            && fetchOptions != null
+            && fetchOptions.getExecutionValues()
+            && fetchOptions.getCompletions());
     ExecutionValueCaching.resetTestResultOutcomes();
     RemoteConfiguredTargetValue.clearSerializationMemos();
     // A reader has the configured targets of its dependencies without their packages, and still

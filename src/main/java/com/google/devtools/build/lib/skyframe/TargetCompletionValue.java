@@ -73,6 +73,6 @@ public class TargetCompletionValue implements SkyValue {
       return false;
     }
 
-    abstract boolean willTest();
+    public abstract boolean willTest();
   }
 }

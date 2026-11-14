@@ -46,6 +46,8 @@ import com.google.devtools.build.lib.profiler.Profiler;
 import com.google.devtools.build.lib.skyframe.ActionExecutionValue;
 import com.google.devtools.build.lib.skyframe.ConfiguredTargetKey;
 import com.google.devtools.build.lib.skyframe.FileOpNodeOrFuture;
+import com.google.devtools.build.lib.skyframe.TargetCompletionValue.TargetCompletionKey;
+import com.google.devtools.build.lib.skyframe.TopLevelActionLookupKeyWrapper;
 import com.google.devtools.build.lib.skyframe.FileOpNodeOrFuture.FileOpNode;
 import com.google.devtools.build.lib.skyframe.FileOpNodeOrFuture.FileOpNodeOrEmpty;
 import com.google.devtools.build.lib.skyframe.FileOpNodeOrFuture.FutureFileOpNode;
@@ -413,6 +415,21 @@ final class SelectedEntrySerializer {
         case ActionLookupSummaryKey summaryKey -> {
           serializationStats.registerExecutionNode();
           uploadExecutionEntry(summaryKey, null);
+        }
+        case TopLevelActionLookupKeyWrapper completion -> {
+          // Selected because the target or aspect was built completely: see
+          // FrontierSerializer#isCompleted. Recorded under a key of its own, with the file
+          // dependencies of the target or aspect as an action's result has them.
+          serializationStats.registerExecutionNode();
+          uploadEntry(
+              CompletedTopLevelKey.of(
+                  completion.actionLookupKey(),
+                  completion.topLevelArtifactContext(),
+                  completion instanceof TargetCompletionKey target && target.willTest()),
+              CompletedTopLevelValue.INSTANCE,
+              completion.actionLookupKey(),
+              /* dependencyDeps= */ null,
+              /* mtsv= */ null);
         }
         default -> throw new AssertionError("Unexpected selected type: " + key.getCanonicalName());
       }

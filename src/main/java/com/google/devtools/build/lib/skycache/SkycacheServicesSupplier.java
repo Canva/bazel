@@ -527,6 +527,9 @@ final class SkycacheServicesSupplier implements RemoteAnalysisCachingServicesSup
         + (ExecutionValueCaching.testResultOutcomes().isEmpty()
             ? ""
             : "; test results: " + ExecutionValueCaching.testResultOutcomes())
+        + (ExecutionValueCaching.completionOutcomes().isEmpty()
+            ? ""
+            : "; top-level targets and aspects: " + ExecutionValueCaching.completionOutcomes())
         + (ExecutionValueCaching.actionsRun(1).isEmpty()
             ? ""
             : "; actions run: " + ExecutionValueCaching.actionsRun(30));
