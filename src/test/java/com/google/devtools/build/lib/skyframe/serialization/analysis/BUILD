@@ -126,6 +126,7 @@ java_test(
     srcs = ["SkycacheExecutionIntegrationTest.java"],
     tags = ["no_windows"],
     deps = [
+        "//src/main/java/com/google/devtools/build/lib/actions",
         "//src/main/java/com/google/devtools/build/lib/actions:action_lookup_data",
         "//src/main/java/com/google/devtools/build/lib/actions:action_lookup_key",
         "//src/main/java/com/google/devtools/build/lib/skyframe/serialization/analysis:execution_value_caching",

@@ -392,28 +392,46 @@ public class BuildTool {
       analysisCacheReaderDeps = analysisDeps.readerDeps();
       serializationDependenciesProvider = analysisDeps.serializationDeps();
 
-      if (env.withMergedAnalysisAndExecutionSourceOfTruth()) {
-        // a.k.a. Skymeld.
-        buildTargetsWithMergedAnalysisExecution(
-            request,
-            result,
-            targetPatternPhaseValue,
-            buildOptions,
-            analysisCachingDeps,
-            analysisCacheReaderDeps);
-      } else {
-        buildTargetsWithoutMergedAnalysisExecution(
-            request,
-            result,
-            targetPatternPhaseValue,
-            buildOptions,
-            analysisCachingDeps,
-            analysisCacheReaderDeps);
+      // A --keep_going build that could not build everything still built the rest, and at the size
+      // of a monorepo there is rarely a commit at which nothing at all fails. Its writer uploads
+      // what did succeed (FrontierSerializer leaves out whatever failed), and a reader builds the
+      // rest itself and so reports the same failures.
+      BuildFailedException uploadDespite = null;
+      try {
+        if (env.withMergedAnalysisAndExecutionSourceOfTruth()) {
+          // a.k.a. Skymeld.
+          buildTargetsWithMergedAnalysisExecution(
+              request,
+              result,
+              targetPatternPhaseValue,
+              buildOptions,
+              analysisCachingDeps,
+              analysisCacheReaderDeps);
+        } else {
+          buildTargetsWithoutMergedAnalysisExecution(
+              request,
+              result,
+              targetPatternPhaseValue,
+              buildOptions,
+              analysisCachingDeps,
+              analysisCacheReaderDeps);
+        }
+      } catch (BuildFailedException e) {
+        if (e.isCatastrophic()
+            || !request.getKeepGoing()
+            || !analysisCacheReaderDeps.mode().serializesValues()
+            || analysisCachingDeps.bailedOut()) {
+          throw e;
+        }
+        uploadDespite = e;
       }
 
       if (analysisCacheReaderDeps.mode().serializesValues()) {
         Preconditions.checkState(!analysisCachingDeps.bailedOut());
         serializeValues(serializationDependenciesProvider);
+      }
+      if (uploadDespite != null) {
+        throw uploadDespite;
       }
 
       if (env.getSkyframeExecutor().getSkyfocusState().enabled()) {

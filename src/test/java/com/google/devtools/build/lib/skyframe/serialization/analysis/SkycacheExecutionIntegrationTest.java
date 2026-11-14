@@ -17,6 +17,7 @@ import static com.google.common.truth.Truth.assertThat;
 import static com.google.common.truth.Truth.assertWithMessage;
 import static com.google.common.util.concurrent.Futures.immediateFuture;
 import static java.util.concurrent.ForkJoinPool.commonPool;
+import static org.junit.Assert.assertThrows;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
@@ -24,6 +25,7 @@ import com.google.common.eventbus.Subscribe;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.devtools.build.lib.actions.ActionLookupData;
 import com.google.devtools.build.lib.actions.ActionLookupKey;
+import com.google.devtools.build.lib.actions.BuildFailedException;
 import com.google.devtools.build.lib.buildtool.util.BuildIntegrationTestCase;
 import com.google.devtools.build.lib.cmdline.LabelConstants;
 import com.google.devtools.build.lib.compress.CompressionService;
@@ -98,6 +100,7 @@ public final class SkycacheExecutionIntegrationTest extends BuildIntegrationTest
     FileDependencySerializer.setRepositoryBoundary(null);
     FileDependencySerializer.setMaxDependencyVersion(FileDependencySerializer.UNBOUNDED);
     ExecutionValueCaching.setEnabled(true);
+    ExecutionValueCaching.setLocalResultsEnabled(true);
     uncommitted = ImmutableSet.of();
   }
 
@@ -490,6 +493,48 @@ public final class SkycacheExecutionIntegrationTest extends BuildIntegrationTest
   }
 
   @Test
+  public void keepGoingBuildThatFailed_writerUploadsWhatSucceeded() throws Exception {
+    write("ok/BUILD", "genrule(name = 'a', outs = ['a.txt'], cmd = 'echo a > $@')");
+    write(
+        "bad/BUILD",
+        "genrule(name = 'b', srcs = ['//ok:a'], outs = ['b.txt'], cmd = 'false')",
+        "genrule(name = 'c', srcs = [':b'], outs = ['c.txt'], cmd = 'cp $< $@')");
+    getSkyframeExecutor().resetEvaluator();
+    addOptions("--experimental_remote_analysis_cache_mode=upload", "--build", "--keep_going");
+    assertThrows(BuildFailedException.class, () -> buildTarget("//ok:a", "//bad:c"));
+    var serialized =
+        getCommandEnvironment().getRemoteAnalysisCachingEventListener().getSerializedKeys().stream()
+            .map(Object::toString)
+            .toList();
+    assertThat(serialized.stream().anyMatch(key -> key.contains("//ok:a"))).isTrue();
+
+    // The reader takes what was built from the cache and fails on the same action.
+    getSkyframeExecutor().resetEvaluator();
+    getDirectories()
+        .getExecRoot(TestConstants.WORKSPACE_NAME)
+        .getRelative("bazel-out")
+        .deleteTree();
+    addOptions("--experimental_remote_analysis_cache_mode=download");
+    assertThrows(BuildFailedException.class, () -> buildTarget("//ok:a", "//bad:c"));
+    var hits =
+        getCommandEnvironment().getRemoteAnalysisCachingEventListener().getCacheHits().stream()
+            .map(Object::toString)
+            .toList();
+    assertThat(hits.stream().anyMatch(key -> key.contains("//ok:a"))).isTrue();
+    events.assertContainsError("Executing genrule //bad:b failed");
+  }
+
+  @Test
+  public void failedBuildWithoutKeepGoing_writerUploadsNothing() throws Exception {
+    write("bad/BUILD", "genrule(name = 'b', outs = ['b.txt'], cmd = 'false')");
+    getSkyframeExecutor().resetEvaluator();
+    addOptions("--experimental_remote_analysis_cache_mode=upload", "--build", "--nokeep_going");
+    assertThrows(BuildFailedException.class, () -> buildTarget("//bad:b"));
+    assertThat(getCommandEnvironment().getRemoteAnalysisCachingEventListener().getSerializedKeys())
+        .isEmpty();
+  }
+
+  @Test
   public void depsetOfStructs_reachedTwice_staysDeduplicated() throws Exception {
     writeSharedStructScenario();
     upload("//dedup:top");
@@ -563,15 +608,18 @@ public final class SkycacheExecutionIntegrationTest extends BuildIntegrationTest
   }
 
   @Test
-  public void uploadThatExecuted_readerStillRunsTheActions() throws Exception {
+  public void localResultsOff_uploadThatExecutedLeavesThemOutAndTheReaderRunsTheActions()
+      throws Exception {
+    // The outputs exist only in the writer's output base: there is no remote cache to have them.
+    ExecutionValueCaching.setLocalResultsEnabled(false);
     writeTreeScenario();
     upload("//consumer:c", /* execute= */ true);
-    assertWithMessage("expected the upload to carry execution values")
+    assertWithMessage("expected the upload to leave out results only the writer has")
         .that(
             getCommandEnvironment().getRemoteAnalysisCachingEventListener().getSerializedKeys()
                 .stream()
                 .anyMatch(ActionLookupData.class::isInstance))
-        .isTrue();
+        .isFalse();
 
     download("//consumer:c");
 

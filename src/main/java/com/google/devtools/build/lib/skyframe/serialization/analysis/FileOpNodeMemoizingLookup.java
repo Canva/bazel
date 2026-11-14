@@ -13,7 +13,6 @@
 // limitations under the License.
 package com.google.devtools.build.lib.skyframe.serialization.analysis;
 
-import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.devtools.build.lib.concurrent.safeexecutor.SafeExecutor.safeDirectExecutor;
 import static com.google.devtools.build.lib.skyframe.FileOpNodeOrFuture.EmptyFileOpNode.EMPTY_FILE_OP_NODE;
@@ -198,7 +197,13 @@ public final class FileOpNodeMemoizingLookup {
         return;
       }
       directDeps = nodeEntry.getDirectDeps();
-      value = checkNotNull(nodeEntry.getValue(), key);
+      value = nodeEntry.getValue();
+      if (value == null) {
+        // In error, in a build that kept going. Whatever depends on it cannot be invalidated
+        // correctly, so it is not uploaded.
+        collector.failWith(MissingSkyframeEntryException.inError(key));
+        return;
+      }
     }
 
     if (key instanceof ActionLookupKey) {

@@ -189,6 +189,7 @@ final class SelectedEntrySerializer {
     private final AtomicLong executionNodes = new AtomicLong(0);
     private final AtomicLong unversionedNodes = new AtomicLong(0);
     private final AtomicLong unserializableExecutionNodes = new AtomicLong(0);
+    private final AtomicLong nodesAboveAnError = new AtomicLong(0);
     private final java.util.concurrent.atomic.AtomicReference<String> firstUnserializable =
         new java.util.concurrent.atomic.AtomicReference<>();
 
@@ -213,6 +214,11 @@ final class SelectedEntrySerializer {
     /** Entries left out because they depend on a source newer than the version they are keyed at. */
     long unversionedNodes() {
       return unversionedNodes.get();
+    }
+
+    /** Entries left out because something they depend on ended in an error. */
+    long nodesAboveAnError() {
+      return nodesAboveAnError.get();
     }
 
     long unserializableExecutionNodes() {
@@ -654,6 +660,11 @@ final class SelectedEntrySerializer {
     @Override
     public void onFailure(Throwable t) {
       writeStatuses.counters.entriesWaitingForInvalidationInfo.decrementAndGet();
+      if (MissingSkyframeEntryException.isAnEntryInError(t)) {
+        serializationStats.nodesAboveAnError.incrementAndGet();
+        writeStatuses.selectedEntryDone();
+        return;
+      }
       writeStatuses.selectedEntryFailed(t);
     }
 
@@ -795,6 +806,11 @@ final class SelectedEntrySerializer {
       @Override
       public void onFailure(Throwable t) {
         writeStatuses.counters.entriesWaitingForInvalidationBytes.decrementAndGet();
+        if (MissingSkyframeEntryException.isAnEntryInError(t)) {
+          serializationStats.nodesAboveAnError.incrementAndGet();
+          writeStatuses.selectedEntryDone();
+          return;
+        }
         if (isExecutionValue(key) && hasSerializationCause(t)) {
           // An execution value that cannot be written, such as a symlink that resolves into the
           // writer's output base, is left out: a reader then runs that action itself.

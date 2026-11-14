@@ -22,10 +22,38 @@ import com.google.devtools.build.skyframe.SkyKey;
  */
 final class MissingSkyframeEntryException extends Exception {
   private final SkyKey key;
+  private final boolean inError;
 
   MissingSkyframeEntryException(SkyKey key) {
     super(key.getCanonicalName() + " was missing");
     this.key = key;
+    this.inError = false;
+  }
+
+  private MissingSkyframeEntryException(SkyKey key, String message) {
+    super(message);
+    this.key = key;
+    this.inError = true;
+  }
+
+  /**
+   * For an entry that is there but ended in an error, in a build that kept going.
+   *
+   * <p>Something that depends on it may have a value all the same, but what would invalidate that
+   * cannot be told in full, so it is left out of the upload: see {@link #isAnEntryInError}.
+   */
+  static MissingSkyframeEntryException inError(SkyKey key) {
+    return new MissingSkyframeEntryException(key, key.getCanonicalName() + " is in error");
+  }
+
+  /** Whether {@code t} is, or was caused by, an exception from {@link #inError}. */
+  static boolean isAnEntryInError(Throwable t) {
+    for (Throwable cause = t; cause != null; cause = cause.getCause()) {
+      if (cause instanceof MissingSkyframeEntryException missing && missing.inError) {
+        return true;
+      }
+    }
+    return false;
   }
 
   SkyKey key() {

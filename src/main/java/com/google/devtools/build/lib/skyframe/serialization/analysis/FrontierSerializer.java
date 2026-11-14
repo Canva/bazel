@@ -127,6 +127,13 @@ public final class FrontierSerializer {
                   "Skycache write: left out %d action results a reader could not use: %s",
                   leftOut.total(), leftOut.summary(40))));
     }
+    if (selectionResult.failed() > 0) {
+      reporter.handle(
+          Event.info(
+              String.format(
+                  "Skycache write: left out %d entries that failed in this build",
+                  selectionResult.failed())));
+    }
     ImmutableSet<SkyKey> selectedKeys = selectionResult.selectedKeys();
     if (!keepStateAfterBuild && serializationDependenciesProvider.shouldMinimizeMemory()) {
       clearActionLookupValues(graph, selectedKeys);
@@ -242,6 +249,11 @@ public final class FrontierSerializer {
                               "; left out %s that depend on changes newer than the version they"
                                   + " would be keyed at",
                               serializationStats.unversionedNodes()))
+                      + (serializationStats.nodesAboveAnError() == 0
+                          ? ""
+                          : String.format(
+                              "; left out %s that depend on something that failed",
+                              serializationStats.nodesAboveAnError()))
                       + (serializationStats.unserializableExecutionNodes() == 0
                           ? ""
                           : String.format(
@@ -353,16 +365,48 @@ public final class FrontierSerializer {
       TraversalMode traversalMode,
       boolean skycacheAnalysisOnly,
       ExecutionValuesForReaders.LeftOut leftOut) {
-    if (activeDirectoriesMatcher.isPresent()) {
-      ImmutableMap<SkyKey, SelectionMarking> selection =
-          computeSelection(
-              graph, activeDirectoriesMatcher.get(), traversalMode, skycacheAnalysisOnly, leftOut);
-      return new SelectionResult(selection);
-    } else {
-      ImmutableMap<SkyKey, SelectionMarking> selection =
-          computeFullSelection(graph, traversalMode, skycacheAnalysisOnly, leftOut);
-      return new SelectionResult(selection);
+    ImmutableMap<SkyKey, SelectionMarking> selection =
+        activeDirectoriesMatcher.isPresent()
+            ? computeSelection(
+                graph,
+                activeDirectoriesMatcher.get(),
+                traversalMode,
+                skycacheAnalysisOnly,
+                leftOut)
+            : computeFullSelection(graph, traversalMode, skycacheAnalysisOnly, leftOut);
+    int selected = selection.size();
+    if (traversalMode == TraversalMode.FOR_SERIALIZATION) {
+      selection = withoutFailures(graph, selection);
     }
+    return new SelectionResult(selection, selected - selection.size());
+  }
+
+  /**
+   * Drops the selected entries that ended in an error.
+   *
+   * <p>The writer of a {@code --keep_going} build that failed uploads what succeeded. An entry in
+   * error has no value to upload, and one that has a value despite an error below it describes a
+   * build that did not finish, so neither is for a reader.
+   */
+  private static ImmutableMap<SkyKey, SelectionMarking> withoutFailures(
+      InMemoryGraph graph, ImmutableMap<SkyKey, SelectionMarking> selection) {
+    Set<SkyKey> failed = Sets.newConcurrentHashSet();
+    selection.keySet().parallelStream()
+        .forEach(
+            key -> {
+              InMemoryNodeEntry node = graph.getIfPresent(key);
+              if (node != null
+                  && node.isDone()
+                  && (node.getErrorInfo() != null || node.getValue() == null)) {
+                failed.add(key);
+              }
+            });
+    if (failed.isEmpty()) {
+      return selection;
+    }
+    return selection.entrySet().stream()
+        .filter(e -> !failed.contains(e.getKey()))
+        .collect(ImmutableMap.toImmutableMap(Map.Entry::getKey, Map.Entry::getValue));
   }
 
   private static ImmutableMap<SkyKey, SelectionMarking> computeSelection(
@@ -498,7 +542,9 @@ public final class FrontierSerializer {
       InMemoryGraph graph, ImmutableSet<SkyKey> selectedKeys) {
     graph.parallelForEach(
         node -> {
-          if (!(node.getKey() instanceof ActionLookupKey key) || selectedKeys.contains(key)) {
+          if (!(node.getKey() instanceof ActionLookupKey key)
+              || selectedKeys.contains(key)
+              || node.getErrorInfo() != null) {
             return;
           }
           // If the ActionLookupKey is NOT selected, its value is not needed for serialization.
@@ -750,7 +796,11 @@ public final class FrontierSerializer {
 
   private record DeletionStats(long nodes, long rdeps) {}
 
-  private record SelectionResult(ImmutableMap<SkyKey, SelectionMarking> selection) {
+  /**
+   * @param failed how many entries were left out of {@code selection} because they ended in an
+   *     error
+   */
+  private record SelectionResult(ImmutableMap<SkyKey, SelectionMarking> selection, int failed) {
     ImmutableSet<SkyKey> selectedKeys() {
       return selection.keySet();
     }
