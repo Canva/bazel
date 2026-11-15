@@ -45,6 +45,7 @@ import com.google.devtools.build.lib.profiler.CounterSeriesTask.Color;
 import com.google.devtools.build.lib.profiler.CounterSeriesTaskImpl;
 import com.google.devtools.build.lib.profiler.Profiler;
 import com.google.devtools.build.lib.skyframe.ActionExecutionValue;
+import com.google.devtools.build.lib.skyframe.AspectKeyCreator.TopLevelAspectsKey;
 import com.google.devtools.build.lib.skyframe.BuildDriverKey;
 import com.google.devtools.build.lib.skyframe.ConfiguredTargetKey;
 import com.google.devtools.build.lib.skyframe.FileOpNodeOrFuture;
@@ -277,7 +278,8 @@ final class SelectedEntrySerializer {
       ProfileCollector profileCollector,
       SerializationStats serializationStats,
       boolean emitUploadedEvents,
-      FileOpNodeMemoizingLookup fileOpNodes)
+      FileOpNodeMemoizingLookup fileOpNodes,
+      ImmutableList<FrontierSerializer.BuiltPackage> builtPackages)
       throws InterruptedException {
     ImmutableMap<PackageIdentifier, AtomicInteger> packageRefcounts = null;
     if (shouldDiscardMemory) {
@@ -336,6 +338,9 @@ final class SelectedEntrySerializer {
 
     for (SkyKey selectedKey : sortedSelection) {
       serializer.upload(selectedKey);
+    }
+    for (FrontierSerializer.BuiltPackage built : builtPackages) {
+      serializer.upload(built);
     }
 
     writeStatuses.finishRegistration();
@@ -438,6 +443,22 @@ final class SelectedEntrySerializer {
               /* dependencyDeps= */ null,
               /* mtsv= */ null);
         }
+        case BuildDriverKey driver when driver.getActionLookupKey() instanceof TopLevelAspectsKey -> {
+          // Selected because every top-level aspect of one target was built: see
+          // FrontierSerializer#builtTheAspectsOfATarget. One record for all of them, whose file
+          // dependencies are those of the node that named the aspects, which has each of them
+          // below it.
+          serializationStats.registerExecutionNode();
+          uploadEntry(
+              CompletedTopLevelKey.of(
+                  driver.getActionLookupKey(),
+                  driver.getTopLevelArtifactContext(),
+                  /* willTest= */ false),
+              CompletedTopLevelValue.INSTANCE,
+              driver.getActionLookupKey(),
+              /* dependencyDeps= */ null,
+              /* mtsv= */ null);
+        }
         case BuildDriverKey driver -> {
           // Selected because the target was built under a key other than the one the build asked
           // for it with: see FrontierSerializer#isBuiltUnderAnotherKey. The record above is under
@@ -471,6 +492,22 @@ final class SelectedEntrySerializer {
       eventBus.post(new SerializedNodeEvent(key));
     } catch (MissingSkyframeEntryException e) {
       writeStatuses.selectedEntryFailed(e);
+    } catch (Throwable t) {
+      writeStatuses.selectedEntryFailed(t);
+    }
+  }
+
+  /**
+   * Uploads the record of the targets of one package that were built with their aspects. Its file
+   * dependencies are those of all of them: it is valid for a reader for whom each of them is.
+   */
+  private void upload(FrontierSerializer.BuiltPackage built) throws InterruptedException {
+    writeStatuses.selectedEntryStartingCapped();
+    try {
+      serializationStats.registerExecutionNode();
+      // The key stands for a node that has the targets and the nodes naming their aspects below
+      // it. There is no such node in the graph, so its dependencies are given.
+      uploadEntry(built.key(), built.value(), built.key(), built.dependsOn(), /* mtsv= */ null);
     } catch (Throwable t) {
       writeStatuses.selectedEntryFailed(t);
     }
@@ -569,7 +606,7 @@ final class SelectedEntrySerializer {
   private void uploadEntry(
       SkyKey key,
       SkyValue value,
-      ActionLookupKey dependencyKey,
+      SkyKey dependencyKey,
       @Nullable Iterable<SkyKey> dependencyDeps,
       @Nullable Version mtsv) {
     new UploadTask(key, value, dependencyKey, dependencyDeps, mtsv).submit();
@@ -579,7 +616,7 @@ final class SelectedEntrySerializer {
       implements RejectionHandlingRunnable, FutureCallback<FileOpNodeOrEmpty> {
     private final SkyKey key;
     private final SkyValue value;
-    private final ActionLookupKey dependencyKey;
+    private final SkyKey dependencyKey;
     @Nullable private final Iterable<SkyKey> dependencyDeps;
     @Nullable private final Version mtsv;
 
@@ -590,7 +627,7 @@ final class SelectedEntrySerializer {
     private UploadTask(
         SkyKey key,
         SkyValue value,
-        ActionLookupKey dependencyKey,
+        SkyKey dependencyKey,
         @Nullable Iterable<SkyKey> dependencyDeps,
         @Nullable Version mtsv) {
       this.key = key;

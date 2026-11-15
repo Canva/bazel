@@ -16,7 +16,9 @@ package com.google.devtools.build.lib.skyframe;
 import static com.google.common.base.Preconditions.checkNotNull;
 
 import com.google.common.collect.ImmutableMap;
+import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
+import com.google.common.util.concurrent.SettableFuture;
 import com.google.devtools.build.lib.actions.ActionLookupData;
 import com.google.devtools.build.lib.actions.ActionLookupKey;
 import com.google.devtools.build.lib.actions.ActionLookupSummaryKey;
@@ -48,6 +50,7 @@ import com.google.devtools.build.skyframe.SkyKey;
 import com.google.devtools.build.skyframe.SkyValue;
 import com.google.devtools.build.skyframe.Version;
 import java.util.List;
+import java.util.concurrent.ForkJoinPool;
 import java.util.function.Supplier;
 import javax.annotation.Nullable;
 
@@ -146,6 +149,81 @@ public final class SkyValueRetrieverUtils {
       }
     }
     return pending ? null : probes;
+  }
+
+  /**
+   * Looks {@code key} up outside the evaluation of any node, for a value whose deserialization
+   * looks nothing up in the graph. The future holds a miss if the lookup failed in any way.
+   */
+  static ListenableFuture<RetrievalResult> retrieveDetached(
+      SkyKey key, RemoteAnalysisCacheReaderDepsProvider analysisCachingDeps)
+      throws InterruptedException {
+    SkyValueRetriever retriever = analysisCachingDeps.getSkyValueRetriever();
+    RemoteAnalysisCacheClient client = analysisCachingDeps.getAnalysisCacheClient();
+    if (retriever == null
+        || client == null
+        || analysisCachingDeps.shouldBailOutOnMissingFingerprint()) {
+      return Futures.immediateFuture(new NoCachedData(MissReason.MISS_REASON_NOT_ATTEMPTED));
+    }
+    DetachedRetrieval retrieval = new DetachedRetrieval(key, retriever, client);
+    retrieval.run();
+    return retrieval.result;
+  }
+
+  /** Takes a retrieval through its steps, each when the future the last one waited for is done. */
+  private static final class DetachedRetrieval implements Runnable, DependOnFutureShim {
+    private final SkyKey key;
+    private final SkyValueRetriever retriever;
+    private final RemoteAnalysisCacheClient client;
+    private final RetrievalContext context = new RetrievalContext();
+    private final SettableFuture<RetrievalResult> result = SettableFuture.create();
+
+    /** What the step in progress waits for. Only one step runs at a time. */
+    @Nullable private ListenableFuture<?> waitingFor;
+
+    private DetachedRetrieval(
+        SkyKey key, SkyValueRetriever retriever, RemoteAnalysisCacheClient client) {
+      this.key = key;
+      this.retriever = retriever;
+      this.client = client;
+    }
+
+    @Override
+    public ObservedFutureStatus dependOnFuture(ListenableFuture<?> future) {
+      if (future.isDone()) {
+        return ObservedFutureStatus.DONE;
+      }
+      waitingFor = future;
+      return ObservedFutureStatus.NOT_DONE;
+    }
+
+    @Override
+    public void run() {
+      try {
+        waitingFor = null;
+        // Without an environment: a value that needs one is not for this.
+        RetrievalResult step = retriever.tryRetrieve(/* env= */ null, this, client, key, context);
+        if (step != Restart.RESTART) {
+          result.set(step);
+          return;
+        }
+        ListenableFuture<?> next = waitingFor;
+        if (next == null) {
+          result.set(new NoCachedData(MissReason.MISS_REASON_UNSPECIFIED));
+          return;
+        }
+        next.addListener(this, ForkJoinPool.commonPool());
+      } catch (SerializationException | RuntimeException e) {
+        result.set(new NoCachedData(MissReason.MISS_REASON_UNSPECIFIED));
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        result.set(new NoCachedData(MissReason.MISS_REASON_UNSPECIFIED));
+      } finally {
+        if (result.isDone()) {
+          context.getState().cleanupSerializationState();
+        }
+      }
+    }
   }
 
   /**

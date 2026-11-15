@@ -36,7 +36,9 @@ import com.google.devtools.build.lib.actions.ActionLookupValue;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.Artifact.DerivedArtifact;
 import com.google.devtools.build.lib.actions.Artifact.SourceArtifact;
+import com.google.devtools.build.lib.analysis.ConfiguredTarget;
 import com.google.devtools.build.lib.analysis.ConfiguredTargetValue;
+import com.google.devtools.build.lib.analysis.TopLevelArtifactContext;
 import com.google.devtools.build.lib.analysis.configuredtargets.InputFileConfiguredTarget;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.cmdline.PackageIdentifier;
@@ -50,11 +52,13 @@ import com.google.devtools.build.lib.server.FailureDetails.RemoteAnalysisCaching
 import com.google.devtools.build.lib.server.FailureDetails.RemoteAnalysisCaching.Code;
 import com.google.devtools.build.lib.skyframe.ActionExecutionValue;
 import com.google.devtools.build.lib.skyframe.ActionTemplateExpansionValue.ActionTemplateExpansionKey;
+import com.google.devtools.build.lib.skyframe.AspectKeyCreator.TopLevelAspectsKey;
 import com.google.devtools.build.lib.skyframe.BuildDriverKey;
 import com.google.devtools.build.lib.skyframe.BuildDriverValue;
 import com.google.devtools.build.lib.skyframe.BzlLoadValue;
 import com.google.devtools.build.lib.skyframe.ConfiguredTargetKey;
 import com.google.devtools.build.lib.skyframe.SkyFunctions;
+import com.google.devtools.build.lib.skyframe.TargetCompletionValue.TargetCompletionKey;
 import com.google.devtools.build.lib.skyframe.TopLevelActionLookupKeyWrapper;
 import com.google.devtools.build.lib.skyframe.serialization.FingerprintValueService;
 import com.google.devtools.build.lib.skyframe.serialization.FrontierNodeVersion;
@@ -76,11 +80,16 @@ import java.io.BufferedOutputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.PrintStream;
+import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Predicate;
@@ -181,6 +190,12 @@ public final class FrontierSerializer {
 
     requireNonNull(versionGetter, "missing versionGetter");
 
+    // Before anything is taken out of the graph below.
+    ImmutableList<BuiltPackage> builtPackages =
+        serializationDependenciesProvider.getSkycacheAnalysisOnly()
+            ? ImmutableList.of()
+            : computeBuiltPackages(graph);
+
     boolean shouldDiscardMemory = !keepStateAfterBuild;
     if (shouldDiscardMemory) {
       // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
@@ -227,7 +242,8 @@ public final class FrontierSerializer {
             profileCollector,
             serializationStats,
             serializationDependenciesProvider.getEmitUploadedEvents(),
-            requireNonNull(serializationDependenciesProvider.getFileOpNodes()));
+            requireNonNull(serializationDependenciesProvider.getFileOpNodes()),
+            builtPackages);
 
     try {
       // Waits for the write to complete uninterruptibly. This avoids returning to the caller
@@ -450,7 +466,7 @@ public final class FrontierSerializer {
             }
             case BuildDriverKey driver
                 when !skycacheAnalysisOnly && traversalMode == TraversalMode.FOR_SERIALIZATION -> {
-              if (isBuiltUnderAnotherKey(driver, node)) {
+              if (isBuiltUnderAnotherKey(driver, node) || builtTheAspectsOfATarget(driver, node)) {
                 selection.putIfAbsent(driver, FRONTIER_CANDIDATE);
               }
             }
@@ -531,7 +547,7 @@ public final class FrontierSerializer {
             }
             case BuildDriverKey driver
                 when !skycacheAnalysisOnly && traversalMode == TraversalMode.FOR_SERIALIZATION -> {
-              if (isBuiltUnderAnotherKey(driver, node)) {
+              if (isBuiltUnderAnotherKey(driver, node) || builtTheAspectsOfATarget(driver, node)) {
                 selection.putIfAbsent(driver, FRONTIER_CANDIDATE);
               }
             }
@@ -663,6 +679,145 @@ public final class FrontierSerializer {
         && driven.getWrappedSkyValue() instanceof ConfiguredTargetValue target
         && !ConfiguredTargetKey.fromConfiguredTarget(target.getConfiguredTarget())
             .equals(requested);
+  }
+
+  /**
+   * Whether {@code node} drove the build of all the top-level aspects of one target, and they were
+   * all built. That is recorded once for the target, under the key that names its aspects
+   * together, as well as once for each aspect.
+   *
+   * <p>A reader that finds the one record valid need not work out which aspects apply to the
+   * target, which takes the target's package and configuration, nor ask about each of them. In a
+   * build with a dozen aspects on every target that is most of what a reader asks.
+   */
+  private static boolean builtTheAspectsOfATarget(BuildDriverKey driver, InMemoryNodeEntry node) {
+    return ExecutionValueCaching.completionsEnabled()
+        && node.isDone()
+        && driver.getActionLookupKey() instanceof TopLevelAspectsKey aspects
+        && aspects.getLabel() != null
+        // Null if one of them failed to build.
+        && node.getValue() instanceof BuildDriverValue driven
+        && !driven.isSkipped();
+  }
+
+  /**
+   * The targets of one package that the build built and did not test, each with all its top-level
+   * aspects, to be recorded together: see {@link CompletedPackageKey}.
+   *
+   * @param dependsOn what the record's file dependencies are taken from: the node of each target
+   *     and the node that named its aspects
+   */
+  record BuiltPackage(
+      CompletedPackageKey key, CompletedPackageValue value, ImmutableList<SkyKey> dependsOn) {}
+
+  private record BuiltTarget(
+      ConfiguredTargetKey requested,
+      ConfiguredTargetKey builtWith,
+      TopLevelArtifactContext context) {}
+
+  /**
+   * Groups the top-level targets that were built, not tested, and had every one of their top-level
+   * aspects built, by package.
+   */
+  private static ImmutableList<BuiltPackage> computeBuiltPackages(InMemoryGraph graph) {
+    if (!ExecutionValueCaching.completionsEnabled()) {
+      return ImmutableList.of();
+    }
+    var targets = new ConcurrentLinkedQueue<BuiltTarget>();
+    // By the key the target was asked for with. Empty for a target one of whose aspects failed.
+    var aspects = new ConcurrentHashMap<ConfiguredTargetKey, Optional<TopLevelAspectsKey>>();
+    graph.parallelForEach(
+        node -> {
+          if (!(node.getKey() instanceof BuildDriverKey driver) || !node.isDone()) {
+            return;
+          }
+          // Null if what it drove failed to build.
+          boolean built = node.getValue() instanceof BuildDriverValue driven && !driven.isSkipped();
+          switch (driver.getActionLookupKey()) {
+            case TopLevelAspectsKey aspectsKey ->
+                aspects.put(
+                    aspectsKey.getBaseConfiguredTargetKey(),
+                    built ? Optional.of(aspectsKey) : Optional.empty());
+            case ConfiguredTargetKey requested when built && requested.getLabel() != null -> {
+              ConfiguredTargetKey builtWith = builtAndNotTested(node);
+              if (builtWith != null) {
+                targets.add(
+                    new BuiltTarget(requested, builtWith, driver.getTopLevelArtifactContext()));
+              }
+            }
+            default -> {}
+          }
+        });
+
+    var byPackage = new HashMap<CompletedPackageKey, List<BuiltTarget>>();
+    for (BuiltTarget target : targets) {
+      Optional<TopLevelAspectsKey> aspectsKey = aspects.get(target.requested());
+      if (aspectsKey != null && aspectsKey.isEmpty()) {
+        continue;
+      }
+      String aspectsName =
+          aspectsKey == null ? "" : aspectsKey.get().getAspectsName();
+      byPackage
+          .computeIfAbsent(
+              CompletedPackageKey.of(
+                  target.requested().getLabel().getPackageIdentifier(),
+                  target.context(),
+                  aspectsName),
+              unused -> new ArrayList<>())
+          .add(target);
+    }
+
+    var packages = ImmutableList.<BuiltPackage>builderWithExpectedSize(byPackage.size());
+    for (Map.Entry<CompletedPackageKey, List<BuiltTarget>> entry : byPackage.entrySet()) {
+      List<BuiltTarget> inPackage = entry.getValue();
+      // In an order that does not depend on the order of the graph.
+      inPackage.sort(Comparator.comparing(target -> target.requested().toString()));
+      var requested = ImmutableList.<ActionLookupKey>builderWithExpectedSize(inPackage.size());
+      var builtWith = ImmutableList.<ActionLookupKey>builderWithExpectedSize(inPackage.size());
+      var dependsOn = ImmutableList.<SkyKey>builder();
+      for (BuiltTarget target : inPackage) {
+        requested.add(target.requested());
+        builtWith.add(target.builtWith());
+        dependsOn.add(target.builtWith());
+        Optional<TopLevelAspectsKey> aspectsKey = aspects.get(target.requested());
+        if (aspectsKey != null) {
+          dependsOn.add(aspectsKey.get());
+        }
+      }
+      packages.add(
+          new BuiltPackage(
+              entry.getKey(),
+              CompletedPackageValue.of(requested.build(), builtWith.build()),
+              dependsOn.build()));
+    }
+    return packages.build();
+  }
+
+  /**
+   * The key a top-level target was built with, if {@code node} drove the build of a rule's target
+   * that was not tested and that a reader can stand in for: see {@link CompletedTopLevelValue}.
+   */
+  @Nullable
+  private static ConfiguredTargetKey builtAndNotTested(InMemoryNodeEntry node) {
+    if (!(node.getValue() instanceof BuildDriverValue driven)
+        || !(driven.getWrappedSkyValue() instanceof ConfiguredTargetValue value)) {
+      return null;
+    }
+    ConfiguredTarget target = value.getConfiguredTarget();
+    // An alias has the label of what it points to: a reader cannot stand in for it.
+    if (target == null
+        || !target.isRuleConfiguredTarget()
+        || !target.getLabel().equals(target.getOriginalLabel())) {
+      return null;
+    }
+    for (SkyKey dep : node.getDirectDeps()) {
+      if (dep instanceof TargetCompletionKey completion) {
+        return completion.willTest()
+            ? null
+            : ConfiguredTargetKey.fromConfiguredTarget(target);
+      }
+    }
+    return null;
   }
 
   /** The mnemonic of the action {@code data} is the result of, for a message. */

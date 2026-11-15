@@ -683,14 +683,24 @@ public final class SkycacheExecutionIntegrationTest extends BuildIntegrationTest
    * @param withoutValues whether the reader reports what is recorded as built without fetching it
    */
   private void downloadCompletedScenario(boolean withoutValues) throws Exception {
+    downloadCompletedScenario(
+        withoutValues, /* byPackage= */ false, "//same:c", "//same:t", "//other:f");
+  }
+
+  /**
+   * @param byPackage whether the reader first asks, once for each package, which of its targets
+   *     were built
+   */
+  private void downloadCompletedScenario(
+      boolean withoutValues, boolean byPackage, String... targets) throws Exception {
     getSkyframeExecutor().resetEvaluator();
     getDirectories().getExecRoot(TestConstants.WORKSPACE_NAME).getRelative("bazel-out")
         .deleteTree();
     ExecutionValueCaching.resetTestResultOutcomes();
     // One at a time, so that every target with nothing to build waits for the one before it.
-    ExecutionValueCaching.resetTopLevelAdmission(1, withoutValues);
+    ExecutionValueCaching.resetTopLevelAdmission(1, withoutValues, byPackage);
     addOptions("--experimental_remote_analysis_cache_mode=download");
-    buildTarget("//same:c", "//same:t", "//other:f");
+    buildTarget(targets);
   }
 
   @Test
@@ -729,11 +739,16 @@ public final class SkycacheExecutionIntegrationTest extends BuildIntegrationTest
 
     downloadCompletedScenario(/* withoutValues= */ true);
 
-    assertThat(ExecutionValueCaching.completionOutcomes()).isEqualTo("6 taken from the cache");
+    // The aspects of each target are recorded as built together, and are not named one by one.
+    assertThat(ExecutionValueCaching.completionOutcomes()).isEqualTo("3 taken from the cache");
+    assertThat(ExecutionValueCaching.topLevelAdmissionSummary())
+        .startsWith("6 records of built top-level targets and aspects asked for first, 6 valid");
     assertThat(ExecutionValueCaching.topLevelAdmissionSummary())
         .contains(" 0 top-level keys had work to do");
     assertThat(ExecutionValueCaching.topLevelAdmissionSummary())
-        .endsWith("3 targets and 3 aspects reported as built without being fetched");
+        .endsWith(
+            "3 targets, 0 aspects and all the aspects of 3 targets reported as built without"
+                + " being fetched");
     // Neither the targets nor the aspects were asked for.
     assertThat(
             getCommandEnvironment().getRemoteAnalysisCachingEventListener().getCacheHits().stream()
@@ -754,6 +769,76 @@ public final class SkycacheExecutionIntegrationTest extends BuildIntegrationTest
     assertThat(ExecutionValueCaching.completionOutcomes()).contains("not cached");
     assertThat(ExecutionValueCaching.topLevelAdmissionSummary())
         .contains("reported as built without being fetched");
+  }
+
+  @Test
+  public void completions_readerWithoutValues_aspectChanged_aspectsAreBuiltAndTargetsAreNot()
+      throws Exception {
+    uploadCompletedScenario();
+
+    clientChanges = ImmutableList.of("asp/defs.bzl");
+    downloadCompletedScenario(/* withoutValues= */ true);
+
+    // No target depends on the aspect's definition, and every aspect does.
+    assertThat(ExecutionValueCaching.topLevelAdmissionSummary())
+        .endsWith(
+            "3 targets, 0 aspects and all the aspects of 0 targets reported as built without"
+                + " being fetched");
+    assertThat(ExecutionValueCaching.completionOutcomes()).contains("3 taken from the cache");
+    assertThat(ExecutionValueCaching.completionOutcomes()).contains("3 not cached");
+    assertThat(output("same", "c.note")).isEqualTo("noted\n");
+  }
+
+  @Test
+  public void completions_readerByPackage_asksAboutNoTarget() throws Exception {
+    uploadCompletedScenario();
+
+    downloadCompletedScenario(
+        /* withoutValues= */ true, /* byPackage= */ true, "//same:c", "//same:t", "//other:f");
+
+    assertThat(ExecutionValueCaching.completionOutcomes()).isEqualTo("3 taken from the cache");
+    assertThat(ExecutionValueCaching.topLevelAdmissionSummary())
+        .startsWith("0 records of built top-level targets and aspects asked for first");
+    assertThat(ExecutionValueCaching.topLevelAdmissionSummary())
+        .contains(
+            "3 targets, 0 aspects and all the aspects of 3 targets reported as built without"
+                + " being fetched");
+    assertThat(ExecutionValueCaching.topLevelAdmissionSummary())
+        .endsWith(
+            "2 packages asked which of their targets were built, 2 valid, answering for 3"
+                + " targets");
+  }
+
+  @Test
+  public void completions_readerByPackage_fewerTargetsThanTheWriterBuilt() throws Exception {
+    uploadCompletedScenario();
+
+    downloadCompletedScenario(/* withoutValues= */ true, /* byPackage= */ true, "//same:c");
+
+    assertThat(ExecutionValueCaching.completionOutcomes()).isEqualTo("1 taken from the cache");
+    assertThat(ExecutionValueCaching.topLevelAdmissionSummary())
+        .endsWith(
+            "1 packages asked which of their targets were built, 1 valid, answering for 1"
+                + " targets");
+  }
+
+  @Test
+  public void completions_readerByPackage_changedPackagesAnswerForNothing() throws Exception {
+    uploadCompletedScenario();
+
+    clientChanges = ImmutableList.of("other/f.txt");
+    downloadCompletedScenario(
+        /* withoutValues= */ true, /* byPackage= */ true, "//same:c", "//same:t", "//other:f");
+
+    // The file is an input of //other:f and of //same:c, so neither package answers, and the
+    // targets are asked about one by one: //same:t is still built.
+    assertThat(output("same", "c.txt")).isEqualTo("a.txt\nb.txt\n");
+    assertThat(ExecutionValueCaching.topLevelAdmissionSummary())
+        .endsWith(
+            "2 packages asked which of their targets were built, 0 valid, answering for 0"
+                + " targets");
+    assertThat(ExecutionValueCaching.completionOutcomes()).contains("taken from the cache");
+    assertThat(ExecutionValueCaching.completionOutcomes()).contains("not cached");
   }
 
   @Test

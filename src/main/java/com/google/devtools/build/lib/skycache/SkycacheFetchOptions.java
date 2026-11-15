@@ -112,4 +112,16 @@ public abstract class SkycacheFetchOptions extends OptionsBase {
               + " nothing reads them in a build that only reports what builds. The targets the"
               + " build result holds then provide nothing. Experimental.")
   public abstract boolean getBuiltWithoutValues();
+
+  @Option(
+      name = "canva_skycache_built_by_package",
+      defaultValue = "true",
+      documentationCategory = OptionDocumentationCategory.UNDOCUMENTED,
+      effectTags = {OptionEffectTag.BAZEL_INTERNAL_CONFIGURATION},
+      help =
+          "With --canva_skycache_built_without_values, a reader first asks, once for each package"
+              + " of its top-level targets, which of them are recorded as built with all their"
+              + " aspects. A package nothing has changed under answers for every target in it,"
+              + " which is then not asked about. Experimental.")
+  public abstract boolean getBuiltByPackage();
 }

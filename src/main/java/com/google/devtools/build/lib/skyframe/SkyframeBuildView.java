@@ -665,6 +665,18 @@ public final class SkyframeBuildView {
                 buildDriverKeyTestContext,
                 eventHandler));
 
+    // A reader of the analysis cache that reports what was built without fetching it asks about
+    // whole packages first.
+    BuiltPackages.ask(
+        ctKeys,
+        topLevelAspectsKeys,
+        topLevelArtifactContext,
+        label ->
+            determineTestTypeImpl(
+                    testsToRun, labelTargetMap, label, buildDriverKeyTestContext, eventHandler)
+                != TestType.NOT_TEST,
+        skyframeExecutor.getRemoteAnalysisCacheReaderDepsProvider());
+
     ImmutableSet<BuildDriverKey> buildDriverCTKeys =
         ctKeys.stream()
             .map(

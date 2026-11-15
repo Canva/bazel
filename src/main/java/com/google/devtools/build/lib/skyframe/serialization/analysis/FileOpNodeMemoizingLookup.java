@@ -161,7 +161,7 @@ public final class FileOpNodeMemoizingLookup {
    * @param directDeps the deps of the corresponding Skyframe node. Must be the same as what will be
    *     committed to Skyframe.
    */
-  FileOpNodeOrFuture computeNode(ActionLookupKey key, SkyValue value, Iterable<SkyKey> directDeps) {
+  FileOpNodeOrFuture computeNode(SkyKey key, SkyValue value, Iterable<SkyKey> directDeps) {
     return nodes.getValueOrFuture(key, value, directDeps);
   }
 

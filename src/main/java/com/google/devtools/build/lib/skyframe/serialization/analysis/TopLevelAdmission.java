@@ -90,9 +90,35 @@ public final class TopLevelAdmission {
   private final AtomicLong builtTargets = new AtomicLong();
   private final AtomicLong builtAspects = new AtomicLong();
 
+  /** The keys that name the aspects of one target, all of which were recorded as built. */
+  private final Set<Object> builtAspectsOfTargets = ConcurrentHashMap.newKeySet();
+
+  /** Whether a reader asks, once for each package, which of its targets were built. */
+  private final boolean byPackage;
+
+  private volatile int packagesAsked;
+  private volatile int packagesValid;
+  private volatile int targetsOfPackages;
+
   public TopLevelAdmission(int window, boolean withoutValues) {
+    this(window, withoutValues, /* byPackage= */ false);
+  }
+
+  public TopLevelAdmission(int window, boolean withoutValues, boolean byPackage) {
     this.window = window;
     this.withoutValues = withoutValues;
+    this.byPackage = byPackage;
+  }
+
+  public boolean byPackage() {
+    return byPackage;
+  }
+
+  /** Notes what asking about whole packages found, before any target was asked about. */
+  public void noteBuiltByPackage(int asked, int valid, int targets) {
+    packagesAsked = asked;
+    packagesValid = valid;
+    targetsOfPackages = targets;
   }
 
   public boolean withoutValues() {
@@ -118,6 +144,11 @@ public final class TopLevelAdmission {
   @Nullable
   public Object builtValue(Object key) {
     return builtValues.get(key);
+  }
+
+  /** Notes that one record said every aspect of a target was built, so none of them was named. */
+  public void noteAspectsOfATargetBuilt(Object topLevelAspectsKey) {
+    builtAspectsOfTargets.add(topLevelAspectsKey);
   }
 
   public void setTopLevelContext(Object context) {
@@ -239,7 +270,7 @@ public final class TopLevelAdmission {
 
   /** A line for the end of the command, or an empty string if nothing was probed. */
   public String describe() {
-    if (asked.get() == 0) {
+    if (asked.get() == 0 && packagesAsked == 0) {
       return "";
     }
     int peak;
@@ -247,11 +278,12 @@ public final class TopLevelAdmission {
       peak = peakWaiting;
     }
     String without =
-        builtValues.isEmpty()
+        builtValues.isEmpty() && builtAspectsOfTargets.isEmpty()
             ? ""
             : String.format(
-                "; %d targets and %d aspects reported as built without being fetched",
-                builtTargets.get(), builtAspects.get());
+                "; %d targets, %d aspects and all the aspects of %d targets reported as built"
+                    + " without being fetched",
+                builtTargets.get(), builtAspects.get(), builtAspectsOfTargets.size());
     return String.format(
         "%d records of built top-level targets and aspects asked for first, %d valid, the last"
             + " answered %.1f s into the command; %d top-level keys had work to do, the first"
@@ -266,7 +298,13 @@ public final class TopLevelAdmission {
         window,
         seconds(lastReleaseNanos.get()),
         peak)
-        + without;
+        + without
+        + (packagesAsked == 0
+            ? ""
+            : String.format(
+                "; %d packages asked which of their targets were built, %d valid, answering for"
+                    + " %d targets",
+                packagesAsked, packagesValid, targetsOfPackages));
   }
 
   private double seconds(long nanos) {

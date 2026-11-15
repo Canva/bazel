@@ -107,7 +107,16 @@ public final class ExecutionValueCaching {
    *     built without fetching it
    */
   public static void resetTopLevelAdmission(int window, boolean withoutValues) {
-    topLevelAdmission = window > 0 ? new TopLevelAdmission(window, withoutValues) : null;
+    resetTopLevelAdmission(window, withoutValues, /* byPackage= */ false);
+  }
+
+  /**
+   * @param byPackage whether a reader that reports targets without fetching them first asks,
+   *     once for each package, which of its targets were built
+   */
+  public static void resetTopLevelAdmission(int window, boolean withoutValues, boolean byPackage) {
+    topLevelAdmission =
+        window > 0 ? new TopLevelAdmission(window, withoutValues, byPackage) : null;
   }
 
   /** The admission of this command's top-level keys, or null if they are not ordered. */

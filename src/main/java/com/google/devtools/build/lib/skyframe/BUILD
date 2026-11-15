@@ -591,6 +591,7 @@ java_library(
     name = "build_driver_function",
     srcs = [
         "BuildDriverFunction.java",
+        "BuiltPackages.java",
         "BuiltTopLevelTargetValue.java",
     ],
     deps = [

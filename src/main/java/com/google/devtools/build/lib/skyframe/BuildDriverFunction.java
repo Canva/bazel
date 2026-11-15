@@ -57,6 +57,7 @@ import com.google.devtools.build.lib.server.FailureDetails.Analysis.Code;
 import com.google.devtools.build.lib.server.FailureDetails.FailureDetail;
 import com.google.devtools.build.lib.skyframe.AspectCompletionValue.AspectCompletionKey;
 import com.google.devtools.build.lib.skyframe.AspectKeyCreator.AspectKey;
+import com.google.devtools.build.lib.skyframe.AspectKeyCreator.TopLevelAspectsKey;
 import com.google.devtools.build.lib.skyframe.BuildDriverKey.TestType;
 import com.google.devtools.build.lib.skyframe.TopLevelStatusEvents.AspectAnalyzedEvent;
 import com.google.devtools.build.lib.skyframe.TopLevelStatusEvents.SomeExecutionStartedEvent;
@@ -138,6 +139,12 @@ public class BuildDriverFunction implements SkyFunction {
     this.additionalPostAnalysisDepsRequestedAndAvailable =
         additionalPostAnalysisDepsRequestedAndAvailable;
   }
+
+  /**
+   * What stands in for the aspects of a target that a reader of the analysis cache found recorded
+   * as built together: none of them, since nothing reads what they provide.
+   */
+  private static final TopLevelAspectsValue NO_ASPECTS = new TopLevelAspectsValue(ImmutableMap.of());
 
   private static class State implements SkyKeyComputeState {
     // It's only necessary to do this check once.
@@ -247,6 +254,29 @@ public class BuildDriverFunction implements SkyFunction {
         } else if (!SkyValueRetrieverUtils.takeTurn(
             actionLookupKey, probes[0].valid(), env, admission)) {
           return null;
+        }
+      } else if (actionLookupKey instanceof TopLevelAspectsKey && admission.withoutValues()) {
+        // One record says that every aspect of the target was built. If it is valid, nothing
+        // here needs to know which aspects those are, which would take the target's package and
+        // its configuration, nor to ask about each of them.
+        if (state.completedProbes == null) {
+          state.completedProbes = new RetrievalContext[] {new RetrievalContext()};
+        }
+        SkyValueRetrieverUtils.CompletedProbe[] probes =
+            SkyValueRetrieverUtils.probeCompleted(
+                ImmutableList.of(
+                    CompletedTopLevelKey.of(
+                        actionLookupKey, topLevelArtifactContext, /* willTest= */ false)),
+                state.completedProbes,
+                env,
+                analysisCachingDepsSupplier.get(),
+                admission);
+        if (probes == null || env.valuesMissing()) {
+          return null;
+        }
+        if (probes[0].valid()) {
+          builtAlready = NO_ASPECTS;
+          admission.noteAspectsOfATargetBuilt(actionLookupKey);
         }
       }
     }

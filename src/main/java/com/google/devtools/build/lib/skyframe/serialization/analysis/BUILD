@@ -137,6 +137,8 @@ java_library(
     name = "frontier_serializer",
     srcs = [
         "AnalysisValueWithMtsv.java",
+        "CompletedPackageKey.java",
+        "CompletedPackageValue.java",
         "CompletedTopLevelKey.java",
         "CompletedTopLevelValue.java",
         "ExecutionValuesForReaders.java",
@@ -182,6 +184,7 @@ java_library(
         "//src/main/java/com/google/devtools/build/lib/skyframe:action_execution_value",
         "//src/main/java/com/google/devtools/build/lib/skyframe:tree_artifact_value",
         "//src/main/java/com/google/devtools/build/lib/skyframe:action_template_expansion_value",
+        "//src/main/java/com/google/devtools/build/lib/skyframe:aspect_key_creator",
         "//src/main/java/com/google/devtools/build/lib/skyframe:build_driver_key",
         "//src/main/java/com/google/devtools/build/lib/skyframe:build_driver_value",
         "//src/main/java/com/google/devtools/build/lib/skyframe:bzl_load_value",

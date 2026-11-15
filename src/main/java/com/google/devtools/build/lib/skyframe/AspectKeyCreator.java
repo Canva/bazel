@@ -405,8 +405,17 @@ public final class AspectKeyCreator {
       return topLevelAspectsClasses;
     }
 
-    ImmutableMap<String, String> getTopLevelAspectsParameters() {
+    public ImmutableMap<String, String> getTopLevelAspectsParameters() {
       return topLevelAspectsParameters;
+    }
+
+    /** Names the aspects and their parameters, which are the same for every target of a build. */
+    public String getAspectsName() {
+      StringBuilder name = new StringBuilder();
+      for (AspectClass aspectClass : topLevelAspectsClasses) {
+        name.append(aspectClass.getKey()).append('\n');
+      }
+      return name.append(new java.util.TreeMap<>(topLevelAspectsParameters)).toString();
     }
 
     @Override
