@@ -667,7 +667,8 @@ public final class SkyframeBuildView {
 
     // A reader of the analysis cache that reports what was built without fetching it asks about
     // whole packages first.
-    BuiltPackages.ask(
+    ImmutableSet<ConfiguredTargetKey> builtWithTheirAspects =
+        BuiltPackages.ask(
         ctKeys,
         topLevelAspectsKeys,
         topLevelArtifactContext,
@@ -693,6 +694,8 @@ public final class SkyframeBuildView {
 
     ImmutableSet<BuildDriverKey> buildDriverAspectKeys =
         topLevelAspectsKeys.stream()
+            // The aspects of a target that is recorded as built with them have nothing to do.
+            .filter(k -> !builtWithTheirAspects.contains(k.getBaseConfiguredTargetKey()))
             .map(
                 k ->
                     BuildDriverKey.ofTopLevelAspect(

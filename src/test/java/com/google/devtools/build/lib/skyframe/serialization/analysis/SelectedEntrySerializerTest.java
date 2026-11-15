@@ -303,7 +303,8 @@ public final class SelectedEntrySerializerTest {
         /* profileCollector= */ null,
         new SelectedEntrySerializer.SerializationStats(),
         /* emitUploadedEvents= */ false,
-        fileOpNodeMemoizingLookup);
+        fileOpNodeMemoizingLookup,
+        /* builtPackages= */ ImmutableList.of());
   }
 
   @Test
@@ -413,7 +414,8 @@ public final class SelectedEntrySerializerTest {
             /* profileCollector= */ null,
             new SelectedEntrySerializer.SerializationStats(),
             /* emitUploadedEvents= */ false,
-            fileOpNodeMemoizingLookup);
+            fileOpNodeMemoizingLookup,
+            /* builtPackages= */ ImmutableList.of());
 
     invalidationStore.waitForPuts(3);
 
@@ -473,7 +475,8 @@ public final class SelectedEntrySerializerTest {
             /* profileCollector= */ null,
             new SelectedEntrySerializer.SerializationStats(),
             /* emitUploadedEvents= */ false,
-            fileOpNodeMemoizingLookup);
+            fileOpNodeMemoizingLookup,
+            /* builtPackages= */ ImmutableList.of());
 
     invalidationStore.waitForPuts(3);
 

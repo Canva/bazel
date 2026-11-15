@@ -14,6 +14,7 @@
 package com.google.devtools.build.lib.skyframe;
 
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.MoreExecutors;
@@ -55,8 +56,10 @@ public final class BuiltPackages {
    * @param aspects the keys that name the top-level aspects of each, or none
    * @param willTest whether the target with a label is going to be tested, which a record of
    *     what was built does not answer for
+   * @return the targets that are recorded as built with all their aspects. Nothing needs to be
+   *     evaluated for the aspects of one of these.
    */
-  public static void ask(
+  public static ImmutableSet<ConfiguredTargetKey> ask(
       List<ConfiguredTargetKey> targets,
       List<TopLevelAspectsKey> aspects,
       TopLevelArtifactContext context,
@@ -69,7 +72,7 @@ public final class BuiltPackages {
         || !admission.byPackage()
         || !cachingDeps.mode().isRetrievalEnabled()
         || cachingDeps.getSkycacheAnalysisOnly()) {
-      return;
+      return ImmutableSet.of();
     }
     String aspectsName = aspects.isEmpty() ? "" : aspects.get(0).getAspectsName();
     var aspectsOf = new HashMap<ConfiguredTargetKey, TopLevelAspectsKey>();
@@ -86,7 +89,7 @@ public final class BuiltPackages {
           .add(target);
     }
     if (byPackage.isEmpty()) {
-      return;
+      return ImmutableSet.of();
     }
 
     var packages = new ArrayList<List<ConfiguredTargetKey>>(byPackage.size());
@@ -104,7 +107,7 @@ public final class BuiltPackages {
     }
 
     int valid = 0;
-    int answered = 0;
+    ImmutableSet.Builder<ConfiguredTargetKey> answered = ImmutableSet.builder();
     for (int i = 0; i < lookups.size(); i++) {
       RetrievalResult result;
       try {
@@ -126,7 +129,7 @@ public final class BuiltPackages {
         if (key == null) {
           continue;
         }
-        answered++;
+        answered.add(target);
         admission.shareProbe(
             CompletedTopLevelKey.of(target, context, /* willTest= */ false),
             found(CompletedTopLevelValue.builtWith(key)));
@@ -135,10 +138,13 @@ public final class BuiltPackages {
           admission.shareProbe(
               CompletedTopLevelKey.of(aspectsKey, context, /* willTest= */ false),
               found(CompletedTopLevelValue.INSTANCE));
+          admission.noteAspectsOfATargetBuilt(aspectsKey);
         }
       }
     }
-    admission.noteBuiltByPackage(lookups.size(), valid, answered);
+    ImmutableSet<ConfiguredTargetKey> built = answered.build();
+    admission.noteBuiltByPackage(lookups.size(), valid, built.size());
+    return built;
   }
 
   private static CompletedProbe found(CompletedTopLevelValue value) {
