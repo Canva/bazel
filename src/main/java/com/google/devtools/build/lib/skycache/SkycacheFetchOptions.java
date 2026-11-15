@@ -83,4 +83,19 @@ public abstract class SkycacheFetchOptions extends OptionsBase {
               + " are downloaded. For builds that check that everything builds and passes."
               + " Experimental.")
   public abstract boolean getCompletions();
+
+  @Option(
+      name = "canva_skycache_top_level_window",
+      defaultValue = "8192",
+      documentationCategory = OptionDocumentationCategory.UNDOCUMENTED,
+      effectTags = {OptionEffectTag.BAZEL_INTERNAL_CONFIGURATION},
+      help =
+          "With --canva_skycache_completions, a reader asks whether each top-level target and"
+              + " aspect was built before it asks for the target or aspect itself, and lets at"
+              + " most this many of those that were built fetch their values at a time. The rest"
+              + " wait, out of the way of the targets that have something to build, which then"
+              + " start building within seconds and not once the rest of the build has been"
+              + " read. Zero asks for everything at once, in the order of the build."
+              + " Experimental.")
+  public abstract int getTopLevelWindow();
 }

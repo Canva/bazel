@@ -19,6 +19,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.stream.Collectors;
+import javax.annotation.Nullable;
 
 /**
  * Whether the remote analysis cache holds execution values: action results and the artifacts they
@@ -88,6 +89,29 @@ public final class ExecutionValueCaching {
 
   public static boolean completionsEnabled() {
     return completions;
+  }
+
+  @Nullable private static volatile TopLevelAdmission topLevelAdmission;
+
+  /**
+   * Sets how many top-level keys with nothing to build may fetch their values at a time, for the
+   * command that is starting; zero or less for no limit, and no asking first whether they were
+   * built. See {@link TopLevelAdmission}.
+   */
+  public static void resetTopLevelAdmission(int window) {
+    topLevelAdmission = window > 0 ? new TopLevelAdmission(window) : null;
+  }
+
+  /** The admission of this command's top-level keys, or null if they are not ordered. */
+  @Nullable
+  public static TopLevelAdmission topLevelAdmission() {
+    return completions && enabled ? topLevelAdmission : null;
+  }
+
+  /** How this command's top-level keys were ordered, or an empty string if they were not. */
+  public static String topLevelAdmissionSummary() {
+    TopLevelAdmission admission = topLevelAdmission;
+    return admission == null ? "" : admission.describe();
   }
 
   private static final ConcurrentHashMap<String, LongAdder> completionOutcomes =

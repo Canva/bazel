@@ -239,11 +239,13 @@ import com.google.devtools.build.lib.skyframe.rewinding.ActionRewindStrategy;
 import com.google.devtools.build.lib.skyframe.serialization.DeserializedSkyValue;
 import com.google.devtools.build.lib.skyframe.serialization.FrontierNodeVersion;
 import com.google.devtools.build.lib.skyframe.serialization.analysis.ClientId;
+import com.google.devtools.build.lib.skyframe.serialization.analysis.ExecutionValueCaching;
 import com.google.devtools.build.lib.skyframe.serialization.analysis.RemoteAnalysisCacheDeps;
 import com.google.devtools.build.lib.skyframe.serialization.analysis.RemoteAnalysisCacheManager;
 import com.google.devtools.build.lib.skyframe.serialization.analysis.RemoteAnalysisCacheReaderDepsProvider;
 import com.google.devtools.build.lib.skyframe.serialization.analysis.RemoteAnalysisCachingDependenciesProvider;
 import com.google.devtools.build.lib.skyframe.serialization.analysis.RemoteAnalysisCachingServerState;
+import com.google.devtools.build.lib.skyframe.serialization.analysis.TopLevelAdmission;
 import com.google.devtools.build.lib.skyframe.toolchains.RegisteredExecutionPlatformsCycleReporter;
 import com.google.devtools.build.lib.skyframe.toolchains.RegisteredExecutionPlatformsFunction;
 import com.google.devtools.build.lib.skyframe.toolchains.RegisteredToolchainsCycleReporter;
@@ -919,7 +921,8 @@ public abstract class SkyframeExecutor implements WalkableGraphFactory {
             () -> getSkyframeBuildView().getStarlarkTransitionCache(),
             ruleClassProvider,
             shouldStoreTransitivePackagesInLoadingAndAnalysis(),
-            this::getExistingPackage));
+            this::getExistingPackage,
+            this::getRemoteAnalysisCacheReaderDepsProvider));
     map.put(SkyFunctions.LOAD_ASPECTS, new LoadAspectsFunction());
     map.put(GenQueryPackageProviderFactory.GENQUERY_SCOPE, GenQueryPackageProviderFactory.FUNCTION);
     map.put(
@@ -1007,6 +1010,8 @@ public abstract class SkyframeExecutor implements WalkableGraphFactory {
         SkyFunctions.ARTIFACT_NESTED_SET,
         new ArtifactNestedSetFunction(this::getConsumedArtifactsTracker));
     BuildDriverFunction buildDriverFunction = newBuildDriverFunction();
+    buildDriverFunction.setRemoteAnalysisCacheReaderDeps(
+        this::getRemoteAnalysisCacheReaderDepsProvider);
     map.put(SkyFunctions.BUILD_DRIVER, buildDriverFunction);
     FlagSetFunction flagSetFunction = new FlagSetFunction();
     map.put(SkyFunctions.FLAG_SET, flagSetFunction);
@@ -3668,6 +3673,15 @@ public abstract class SkyframeExecutor implements WalkableGraphFactory {
         @Nullable SkyValue newValue,
         @Nullable ErrorInfo newError,
         @Nullable GroupedDeps directDeps) {
+      if (skyKey instanceof ActionLookupKey) {
+        // A top-level target or aspect that was waiting its turn to fetch its value has it, or has
+        // failed. The function that drives it gives up the turn when it sees the value; it is not
+        // run again for a failure in a build that keeps going, and the turn must not be lost.
+        TopLevelAdmission admission = ExecutionValueCaching.topLevelAdmission();
+        if (admission != null) {
+          admission.release(skyKey);
+        }
+      }
       if (heuristicallyDropNodes) {
         Object argument = skyKey.argument();
         if (skyKey.functionName().equals(SkyFunctions.FILE)) {

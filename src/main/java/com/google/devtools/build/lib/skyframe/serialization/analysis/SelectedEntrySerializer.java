@@ -44,6 +44,7 @@ import com.google.devtools.build.lib.profiler.CounterSeriesTask.Color;
 import com.google.devtools.build.lib.profiler.CounterSeriesTaskImpl;
 import com.google.devtools.build.lib.profiler.Profiler;
 import com.google.devtools.build.lib.skyframe.ActionExecutionValue;
+import com.google.devtools.build.lib.skyframe.BuildDriverKey;
 import com.google.devtools.build.lib.skyframe.ConfiguredTargetKey;
 import com.google.devtools.build.lib.skyframe.FileOpNodeOrFuture;
 import com.google.devtools.build.lib.skyframe.TargetCompletionValue.TargetCompletionKey;
@@ -436,6 +437,34 @@ final class SelectedEntrySerializer {
               completion.actionLookupKey(),
               /* dependencyDeps= */ null,
               /* mtsv= */ null);
+        }
+        case BuildDriverKey driver -> {
+          // Selected because the target was built under a key other than the one the build asked
+          // for it with: see FrontierSerializer#isBuiltUnderAnotherKey. The record above is under
+          // the key it was built with; this is the same record under the key a reader asks with.
+          TargetCompletionKey built = null;
+          if (entry != null) {
+            for (SkyKey dep : entry.getDirectDeps()) {
+              if (dep instanceof TargetCompletionKey completion) {
+                built = completion;
+                break;
+              }
+            }
+          }
+          if (built == null) {
+            writeStatuses.selectedEntryDone();
+          } else {
+            serializationStats.registerExecutionNode();
+            uploadEntry(
+                CompletedTopLevelKey.of(
+                    driver.getActionLookupKey(),
+                    driver.getTopLevelArtifactContext(),
+                    built.willTest()),
+                CompletedTopLevelValue.INSTANCE,
+                built.actionLookupKey(),
+                /* dependencyDeps= */ null,
+                /* mtsv= */ null);
+          }
         }
         default -> throw new AssertionError("Unexpected selected type: " + key.getCanonicalName());
       }

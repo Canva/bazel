@@ -22,6 +22,7 @@ import com.google.auto.value.AutoValue;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableCollection;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
@@ -67,6 +68,10 @@ import com.google.devtools.build.lib.skyframe.TopLevelStatusEvents.TopLevelTarge
 import com.google.devtools.build.lib.skyframe.TopLevelStatusEvents.TopLevelTargetReadyForSymlinkPlanting;
 import com.google.devtools.build.lib.skyframe.TopLevelStatusEvents.TopLevelTargetSkippedEvent;
 import com.google.devtools.build.lib.skyframe.config.BuildConfigurationKey;
+import com.google.devtools.build.lib.skyframe.serialization.SkyValueRetriever.RetrievalContext;
+import com.google.devtools.build.lib.skyframe.serialization.analysis.CompletedTopLevelKey;
+import com.google.devtools.build.lib.skyframe.serialization.analysis.RemoteAnalysisCacheReaderDepsProvider;
+import com.google.devtools.build.lib.skyframe.serialization.analysis.TopLevelAdmission;
 import com.google.devtools.build.lib.util.RegexFilter;
 import com.google.devtools.build.skyframe.SkyFunction;
 import com.google.devtools.build.skyframe.SkyFunction.Environment.SkyKeyComputeState;
@@ -140,6 +145,27 @@ public class BuildDriverFunction implements SkyFunction {
     private boolean checkedForPlatformCompatibility = false;
 
     private TestType testType;
+
+    /** Of the lookups that say whether the target was built, with and without testing it. */
+    @Nullable private RetrievalContext[] completedProbes;
+
+    @Override
+    public void close() {
+      if (completedProbes != null) {
+        for (RetrievalContext context : completedProbes) {
+          context.getState().cleanupSerializationState();
+        }
+      }
+    }
+  }
+
+  /** Set by the executor that owns this function. Null in one that has no analysis cache. */
+  @Nullable
+  private Supplier<RemoteAnalysisCacheReaderDepsProvider> analysisCachingDepsSupplier;
+
+  public void setRemoteAnalysisCacheReaderDeps(
+      Supplier<RemoteAnalysisCacheReaderDepsProvider> analysisCachingDepsSupplier) {
+    this.analysisCachingDepsSupplier = analysisCachingDepsSupplier;
   }
 
   public void setShouldCheckForConflictWithTraversal(
@@ -167,6 +193,37 @@ public class BuildDriverFunction implements SkyFunction {
 
     Set<TopLevelStatusEvents.Type> postedEventsTypes =
         keyToPostedEvents.computeIfAbsent(buildDriverKey, (unused) -> new HashSet<>());
+    // A reader of the analysis cache that records what was built asks for that record before it
+    // asks for the target, and lets a target with nothing to build wait its turn for its value:
+    // see TopLevelAdmission. The aspects of a target are known only to the function that computes
+    // them, which does the same for them.
+    TopLevelAdmission admission =
+        SkyValueRetrieverUtils.topLevelAdmission(analysisCachingDepsSupplier, env);
+    if (admission != null && !env.valuesMissing()) {
+      admission.setTopLevelContext(topLevelArtifactContext);
+      if (actionLookupKey instanceof ConfiguredTargetKey) {
+        if (state.completedProbes == null) {
+          state.completedProbes =
+              new RetrievalContext[] {new RetrievalContext(), new RetrievalContext()};
+        }
+        // Whether the target is going to be tested is not known without it.
+        if (!SkyValueRetrieverUtils.takeTurn(
+            actionLookupKey,
+            ImmutableList.of(
+                CompletedTopLevelKey.of(
+                    actionLookupKey, topLevelArtifactContext, /* willTest= */ true),
+                CompletedTopLevelKey.of(
+                    actionLookupKey, topLevelArtifactContext, /* willTest= */ false)),
+            /* alternatives= */ true,
+            state.completedProbes,
+            env,
+            analysisCachingDepsSupplier.get(),
+            admission)) {
+          return null;
+        }
+      }
+    }
+
     // Why SkyValue and not ActionLookupValue? The evaluation of some ActionLookupKey can result in
     // classes that don't implement ActionLookupValue
     // (e.g. ConfiguredTargetKey -> NonRuleConfiguredTargetValue).
@@ -174,6 +231,9 @@ public class BuildDriverFunction implements SkyFunction {
     try {
       topLevelSkyValue = env.getValueOrThrow(actionLookupKey, AbstractSaneAnalysisException.class);
     } catch (AbstractSaneAnalysisException e) {
+      if (admission != null) {
+        admission.release(actionLookupKey);
+      }
       signalAnalysisConclusionIfKeepGoing(
           env, buildDriverKey, postedEventsTypes, /* success= */ false);
       throw BuildDriverFunctionException.ofConfiguredTargetOrAspectEval(e);
@@ -181,6 +241,27 @@ public class BuildDriverFunction implements SkyFunction {
 
     if (env.valuesMissing()) {
       return null;
+    }
+    if (admission != null) {
+      admission.release(actionLookupKey);
+      if (topLevelSkyValue instanceof ConfiguredTargetValue target) {
+        // The completion function asks for the record under the key the target was built with,
+        // which is not the one this function has if the rule transitioned. A writer records both
+        // and they say the same, so what was found under this one answers for the other.
+        ConfiguredTargetKey builtWith =
+            ConfiguredTargetKey.fromConfiguredTarget(target.getConfiguredTarget());
+        if (!builtWith.equals(actionLookupKey)) {
+          for (boolean willTest : new boolean[] {true, false}) {
+            Object found =
+                admission.probed(
+                    CompletedTopLevelKey.of(actionLookupKey, topLevelArtifactContext, willTest));
+            if (found != null) {
+              admission.shareProbe(
+                  CompletedTopLevelKey.of(builtWith, topLevelArtifactContext, willTest), found);
+            }
+          }
+        }
+      }
     }
 
     // At this point, the target is considered "analyzed". It's important that this event is sent

@@ -63,8 +63,15 @@ java_library(
 
 java_library(
     name = "execution_value_caching",
-    srcs = ["ExecutionValueCaching.java"],
+    srcs = [
+        "ExecutionValueCaching.java",
+        "TopLevelAdmission.java",
+    ],
     visibility = ["//src:__subpackages__"],
+    deps = [
+        "//third_party/java/guava:concurrent",
+        "//third_party/java/jsr305_annotations",
+    ],
 )
 
 java_library(
@@ -174,6 +181,8 @@ java_library(
         "//src/main/java/com/google/devtools/build/lib/skyframe:action_execution_value",
         "//src/main/java/com/google/devtools/build/lib/skyframe:tree_artifact_value",
         "//src/main/java/com/google/devtools/build/lib/skyframe:action_template_expansion_value",
+        "//src/main/java/com/google/devtools/build/lib/skyframe:build_driver_key",
+        "//src/main/java/com/google/devtools/build/lib/skyframe:build_driver_value",
         "//src/main/java/com/google/devtools/build/lib/skyframe:bzl_load_value",
         "//src/main/java/com/google/devtools/build/lib/skyframe:configured_target_key",
         "//src/main/java/com/google/devtools/build/lib/skyframe:filesystem_keys",

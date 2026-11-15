@@ -532,7 +532,10 @@ final class SkycacheServicesSupplier implements RemoteAnalysisCachingServicesSup
             : "; top-level targets and aspects: " + ExecutionValueCaching.completionOutcomes())
         + (ExecutionValueCaching.actionsRun(1).isEmpty()
             ? ""
-            : "; actions run: " + ExecutionValueCaching.actionsRun(30));
+            : "; actions run: " + ExecutionValueCaching.actionsRun(30))
+        + (ExecutionValueCaching.topLevelAdmissionSummary().isEmpty()
+            ? ""
+            : "; order: " + ExecutionValueCaching.topLevelAdmissionSummary());
   }
 
   @Override

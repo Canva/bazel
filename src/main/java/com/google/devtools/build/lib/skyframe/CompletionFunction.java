@@ -65,6 +65,7 @@ import com.google.devtools.build.lib.skyframe.serialization.SkyValueRetriever.Se
 import com.google.devtools.build.lib.skyframe.serialization.analysis.CompletedTopLevelKey;
 import com.google.devtools.build.lib.skyframe.serialization.analysis.ExecutionValueCaching;
 import com.google.devtools.build.lib.skyframe.serialization.analysis.RemoteAnalysisCacheReaderDepsProvider;
+import com.google.devtools.build.lib.skyframe.serialization.analysis.TopLevelAdmission;
 import com.google.devtools.build.lib.util.DetailedExitCode;
 import com.google.devtools.build.lib.util.Pair;
 import com.google.devtools.build.skyframe.SkyFunction;
@@ -185,8 +186,21 @@ public final class CompletionFunction<
                 key.actionLookupKey(),
                 key.topLevelArtifactContext(),
                 key instanceof TargetCompletionKey targetKey && targetKey.willTest());
-        switch (retrieveRemoteSkyValue(
-            completed, env, cachingDependencies, CompletedRetrievalState::new)) {
+        // Asked for already, if the reader orders its top-level keys by whether they have work
+        // to do: see TopLevelAdmission. The answer is counted here, where it is acted on.
+        TopLevelAdmission admission = ExecutionValueCaching.topLevelAdmission();
+        SkyValueRetriever.RetrievalResult retrieval;
+        if (admission != null
+            && admission.probed(completed) instanceof SkyValueRetrieverUtils.CompletedProbe probe) {
+          retrieval = probe.result();
+          cachingDependencies.recordRetrievalResult(
+              retrieval, completed, probe.phaseDurationMicros());
+        } else {
+          retrieval =
+              retrieveRemoteSkyValue(
+                  completed, env, cachingDependencies, CompletedRetrievalState::new);
+        }
+        switch (retrieval) {
           case SkyValueRetriever.Restart unused:
             return null;
           case SkyValueRetriever.RetrievedValue unused:

@@ -29,6 +29,7 @@ import com.google.devtools.build.lib.analysis.AspectValue;
 import com.google.devtools.build.lib.analysis.ConfiguredRuleClassProvider;
 import com.google.devtools.build.lib.analysis.ConfiguredTargetValue;
 import com.google.devtools.build.lib.analysis.InconsistentAspectOrderException;
+import com.google.devtools.build.lib.analysis.TopLevelArtifactContext;
 import com.google.devtools.build.lib.analysis.TransitiveDependencyState;
 import com.google.devtools.build.lib.analysis.config.StarlarkTransitionCache;
 import com.google.devtools.build.lib.analysis.config.transitions.PatchTransition;
@@ -56,6 +57,10 @@ import com.google.devtools.build.lib.skyframe.AspectKeyCreator.TopLevelAspectsKe
 import com.google.devtools.build.lib.skyframe.ConfiguredTargetEvaluationExceptions.DependencyException;
 import com.google.devtools.build.lib.skyframe.ConfiguredTargetEvaluationExceptions.ReportedException;
 import com.google.devtools.build.lib.skyframe.config.BuildConfigurationKey;
+import com.google.devtools.build.lib.skyframe.serialization.SkyValueRetriever.RetrievalContext;
+import com.google.devtools.build.lib.skyframe.serialization.analysis.CompletedTopLevelKey;
+import com.google.devtools.build.lib.skyframe.serialization.analysis.RemoteAnalysisCacheReaderDepsProvider;
+import com.google.devtools.build.lib.skyframe.serialization.analysis.TopLevelAdmission;
 import com.google.devtools.build.lib.util.DetailedExitCode;
 import com.google.devtools.build.skyframe.SkyFunction;
 import com.google.devtools.build.skyframe.SkyFunction.Environment.SkyKeyComputeState;
@@ -88,12 +93,15 @@ final class ToplevelStarlarkAspectFunction implements SkyFunction {
   // Do not use this field for package retrieval of the base configured target since it will cause
   // incrementality errors because an essential dependency edge would not be registered.
   private final PrerequisitePackageFunction prerequisitePackages;
+  private final Supplier<RemoteAnalysisCacheReaderDepsProvider> analysisCachingDepsSupplier;
 
   ToplevelStarlarkAspectFunction(
       Supplier<StarlarkTransitionCache> starlarkTransitionCacheSupplier,
       ConfiguredRuleClassProvider ruleClassProvider,
       boolean storeTransitivePackages,
-      PrerequisitePackageFunction prerequisitePackages) {
+      PrerequisitePackageFunction prerequisitePackages,
+      Supplier<RemoteAnalysisCacheReaderDepsProvider> analysisCachingDepsSupplier) {
+    this.analysisCachingDepsSupplier = requireNonNull(analysisCachingDepsSupplier);
     this.starlarkTransitionCacheSupplier = requireNonNull(starlarkTransitionCacheSupplier);
     this.ruleClassProvider = requireNonNull(ruleClassProvider);
     this.storeTransitivePackages = storeTransitivePackages;
@@ -151,9 +159,43 @@ final class ToplevelStarlarkAspectFunction implements SkyFunction {
       return null; // alias target needs to be resolved
     }
 
+    // As for a top-level target in BuildDriverFunction: a reader of the analysis cache asks what
+    // was built before it asks for the aspects, and aspects with nothing to build wait their turn.
+    TopLevelAdmission admission =
+        SkyValueRetrieverUtils.topLevelAdmission(analysisCachingDepsSupplier, env);
+    if (admission != null
+        && admission.topLevelContext() instanceof TopLevelArtifactContext topLevelContext
+        && !aspectsKeys.isEmpty()
+        && !env.valuesMissing()) {
+      if (state.completedProbes == null) {
+        state.completedProbes = new RetrievalContext[aspectsKeys.size()];
+        for (int i = 0; i < state.completedProbes.length; i++) {
+          state.completedProbes[i] = new RetrievalContext();
+        }
+      }
+      ImmutableList.Builder<CompletedTopLevelKey> completions =
+          ImmutableList.builderWithExpectedSize(aspectsKeys.size());
+      for (AspectKey aspectKey : aspectsKeys) {
+        completions.add(CompletedTopLevelKey.of(aspectKey, topLevelContext, /* willTest= */ false));
+      }
+      if (!SkyValueRetrieverUtils.takeTurn(
+          topLevelAspectsKey,
+          completions.build(),
+          /* alternatives= */ false,
+          state.completedProbes,
+          env,
+          analysisCachingDepsSupplier.get(),
+          admission)) {
+        return null;
+      }
+    }
+
     SkyframeLookupResult result = env.getValuesAndExceptions(aspectsKeys);
     if (env.valuesMissing()) {
       return null; // some aspects keys are not evaluated
+    }
+    if (admission != null) {
+      admission.release(topLevelAspectsKey);
     }
     ImmutableMap.Builder<AspectKey, AspectValue> valuesMap =
         ImmutableMap.builderWithExpectedSize(aspectsKeys.size());
@@ -420,6 +462,9 @@ final class ToplevelStarlarkAspectFunction implements SkyFunction {
 
     // --------------- Aspect fields ------------------
     @Nullable private ImmutableList<AspectKey> aspectKeys;
+
+    /** Of the lookups that say whether each aspect was built, in the order of the keys. */
+    @Nullable private RetrievalContext[] completedProbes;
 
     // --------------- Error handling fields ------------------
     @Nullable private String message = null;

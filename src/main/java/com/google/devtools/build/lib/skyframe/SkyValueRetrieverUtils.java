@@ -15,11 +15,14 @@ package com.google.devtools.build.lib.skyframe;
 
 import static com.google.common.base.Preconditions.checkNotNull;
 
+import com.google.common.collect.ImmutableMap;
+import com.google.common.util.concurrent.ListenableFuture;
 import com.google.devtools.build.lib.actions.ActionLookupData;
 import com.google.devtools.build.lib.actions.ActionLookupKey;
 import com.google.devtools.build.lib.actions.ActionLookupSummaryKey;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.cmdline.Label;
+import com.google.devtools.build.lib.skyframe.serialization.DependOnFutureShim;
 import com.google.devtools.build.lib.skyframe.serialization.DependOnFutureShim.DefaultDependOnFutureShim;
 import com.google.devtools.build.lib.skyframe.serialization.DeserializedSkyValue;
 import com.google.devtools.build.lib.skyframe.serialization.SerializationException;
@@ -27,20 +30,25 @@ import com.google.devtools.build.lib.skyframe.serialization.SkyValueRetriever;
 import com.google.devtools.build.lib.skyframe.serialization.SkyValueRetriever.NoCachedData;
 import com.google.devtools.build.lib.skyframe.serialization.SkyValueRetriever.Restart;
 import com.google.devtools.build.lib.skyframe.serialization.SkyValueRetriever.RetrievalContext;
+import com.google.devtools.build.lib.skyframe.serialization.SkyValueRetriever.RetrievalPhase;
 import com.google.devtools.build.lib.skyframe.serialization.SkyValueRetriever.RetrievalResult;
 import com.google.devtools.build.lib.skyframe.serialization.SkyValueRetriever.RetrievedValue;
 import com.google.devtools.build.lib.skyframe.serialization.SkyValueRetriever.SerializableSkyKeyComputeState;
 import com.google.devtools.build.lib.skyframe.serialization.analysis.AnalysisValueWithMtsv;
 import com.google.devtools.build.lib.skyframe.serialization.analysis.CompletedTopLevelKey;
+import com.google.devtools.build.lib.skyframe.serialization.analysis.ExecutionValueCaching;
 import com.google.devtools.build.lib.skyframe.serialization.analysis.RemoteAnalysisCacheClient;
 import com.google.devtools.build.lib.skyframe.serialization.analysis.RemoteAnalysisCacheReaderDepsProvider;
 import com.google.devtools.build.lib.skyframe.serialization.analysis.SkycacheUploadClient;
+import com.google.devtools.build.lib.skyframe.serialization.analysis.TopLevelAdmission;
 import com.google.devtools.build.lib.skyframe.serialization.analysis.proto.MissReason;
 import com.google.devtools.build.skyframe.SkyFunction.Environment;
 import com.google.devtools.build.skyframe.SkyKey;
 import com.google.devtools.build.skyframe.SkyValue;
 import com.google.devtools.build.skyframe.Version;
+import java.util.List;
 import java.util.function.Supplier;
+import javax.annotation.Nullable;
 
 /**
  * A wrapper around {@link SkyValueRetriever} to handle Bazel-on-Skyframe specific logic, metrics
@@ -53,6 +61,177 @@ public final class SkyValueRetrieverUtils {
       Environment env,
       RemoteAnalysisCacheReaderDepsProvider analysisCachingDeps,
       Supplier<? extends SerializableSkyKeyComputeState> stateSupplier)
+      throws InterruptedException {
+    return retrieve(
+        key, env, analysisCachingDeps, () -> env.getState(stateSupplier).getRetrievalContext());
+  }
+
+  /**
+   * As {@link #retrieveRemoteSkyValue(SkyKey, Environment, RemoteAnalysisCacheReaderDepsProvider,
+   * Supplier)}, for a function that looks up keys other than its own and so keeps the context of
+   * each lookup itself, between restarts.
+   */
+  public static RetrievalResult retrieveRemoteSkyValue(
+      SkyKey key,
+      Environment env,
+      RemoteAnalysisCacheReaderDepsProvider analysisCachingDeps,
+      RetrievalContext context)
+      throws InterruptedException {
+    return retrieve(key, env, analysisCachingDeps, () -> context);
+  }
+
+  /**
+   * What asking the cache for a {@link CompletedTopLevelKey} found, ahead of the function that
+   * acts on it.
+   */
+  record CompletedProbe(
+      RetrievalResult result, ImmutableMap<RetrievalPhase, Long> phaseDurationMicros) {
+    boolean valid() {
+      return result instanceof RetrievedValue;
+    }
+  }
+
+  /**
+   * Asks the cache whether each of {@code keys} is recorded as built, without waiting for one
+   * answer before asking for the next.
+   *
+   * <p>The answers are kept in {@code admission}, where the completion function of each key finds
+   * its own, and counts it.
+   *
+   * @param contexts one for each key, kept by the caller between restarts
+   * @return the answers in the order of the keys, or null if some are not known yet. The caller
+   *     then returns null: what it waits for is registered.
+   */
+  @Nullable
+  static CompletedProbe[] probeCompleted(
+      List<CompletedTopLevelKey> keys,
+      RetrievalContext[] contexts,
+      Environment env,
+      RemoteAnalysisCacheReaderDepsProvider analysisCachingDeps,
+      TopLevelAdmission admission)
+      throws InterruptedException {
+    CompletedProbe[] probes = new CompletedProbe[keys.size()];
+    boolean pending = false;
+    DependOnFutureShim shim = new SeveralFuturesShim(env);
+    for (int i = 0; i < probes.length; i++) {
+      CompletedTopLevelKey key = keys.get(i);
+      if (admission.probed(key) instanceof CompletedProbe known) {
+        probes[i] = known;
+        continue;
+      }
+      RetrievalContext context = contexts[i];
+      RetrievalResult result =
+          retrieve(key, env, analysisCachingDeps, () -> context, shim, /* record= */ false);
+      if (result == Restart.RESTART) {
+        pending = true;
+        continue;
+      }
+      probes[i] = new CompletedProbe(result, context.getPhaseDurationMicros());
+      if (!(result instanceof NoCachedData(MissReason reason)
+          && reason == MissReason.MISS_REASON_NOT_ATTEMPTED)) {
+        admission.recordProbe(key, probes[i], probes[i].valid());
+      }
+    }
+    return pending ? null : probes;
+  }
+
+  /**
+   * Returns how this command orders its top-level keys, or null if it does not: it is not reading
+   * records of what was built, or the function is only being run to report an error.
+   */
+  @Nullable
+  static TopLevelAdmission topLevelAdmission(
+      @Nullable Supplier<RemoteAnalysisCacheReaderDepsProvider> analysisCachingDeps,
+      Environment env) {
+    TopLevelAdmission admission = ExecutionValueCaching.topLevelAdmission();
+    if (admission == null || analysisCachingDeps == null || env.inErrorBubbling()) {
+      return null;
+    }
+    RemoteAnalysisCacheReaderDepsProvider deps = analysisCachingDeps.get();
+    return deps.mode().isRetrievalEnabled() && !deps.getSkycacheAnalysisOnly() ? admission : null;
+  }
+
+  /**
+   * Has a top-level key take its turn to fetch its value: at once if it has work to do, and
+   * otherwise when {@code admission} lets it through. See {@link TopLevelAdmission}.
+   *
+   * <p>The key has work to do unless the cache records as built what it is going to be asked for:
+   * every one of {@code completions}, or with {@code alternatives} any one of them, for a caller
+   * that cannot tell yet which it is going to be.
+   *
+   * @param contexts one for each of {@code completions}, kept by the caller between restarts
+   * @return false if the caller is to return null and be restarted
+   */
+  static boolean takeTurn(
+      ActionLookupKey topLevelKey,
+      List<CompletedTopLevelKey> completions,
+      boolean alternatives,
+      RetrievalContext[] contexts,
+      Environment env,
+      RemoteAnalysisCacheReaderDepsProvider analysisCachingDeps,
+      TopLevelAdmission admission)
+      throws InterruptedException {
+    CompletedProbe[] probes =
+        probeCompleted(completions, contexts, env, analysisCachingDeps, admission);
+    if (probes == null || env.valuesMissing()) {
+      return false;
+    }
+    boolean built = !alternatives;
+    for (CompletedProbe probe : probes) {
+      built = alternatives ? built || probe.valid() : built && probe.valid();
+    }
+    if (!built) {
+      admission.noteHasWork(topLevelKey);
+      return true;
+    }
+    env.dependOnFuture(admission.admit(topLevelKey));
+    return !env.valuesMissing();
+  }
+
+  /**
+   * Lets a function wait for several futures at once. {@link DefaultDependOnFutureShim} refuses a
+   * second while the first is pending.
+   *
+   * <p>A future that completes while it is being registered is reported as done, and may have been
+   * registered all the same, so a caller checks {@link Environment#valuesMissing} before it
+   * returns a value.
+   */
+  private static final class SeveralFuturesShim implements DependOnFutureShim {
+    private final Environment env;
+
+    private SeveralFuturesShim(Environment env) {
+      this.env = env;
+    }
+
+    @Override
+    public ObservedFutureStatus dependOnFuture(ListenableFuture<?> future) {
+      env.dependOnFuture(future);
+      return future.isDone() ? ObservedFutureStatus.DONE : ObservedFutureStatus.NOT_DONE;
+    }
+  }
+
+  private static RetrievalResult retrieve(
+      SkyKey key,
+      Environment env,
+      RemoteAnalysisCacheReaderDepsProvider analysisCachingDeps,
+      Supplier<RetrievalContext> contextSupplier)
+      throws InterruptedException {
+    return retrieve(
+        key,
+        env,
+        analysisCachingDeps,
+        contextSupplier,
+        new DefaultDependOnFutureShim(env),
+        /* record= */ true);
+  }
+
+  private static RetrievalResult retrieve(
+      SkyKey key,
+      Environment env,
+      RemoteAnalysisCacheReaderDepsProvider analysisCachingDeps,
+      Supplier<RetrievalContext> contextSupplier,
+      DependOnFutureShim futuresShim,
+      boolean record)
       throws InterruptedException {
     if (env.inErrorBubbling()) {
       // Remote retrieval during error bubbling causes incorrect error propagation. See b/449016469.
@@ -85,16 +264,18 @@ public final class SkyValueRetrieverUtils {
     }
 
     RetrievalResult retrievalResult = null;
-    RetrievalContext state = env.getState(stateSupplier).getRetrievalContext();
+    RetrievalContext state = contextSupplier.get();
     if (state.isInitialQuery()) {
       state.setStartTimestampNanos(System.nanoTime());
     }
     try {
       retrievalResult =
-          retriever.tryRetrieve(env, new DefaultDependOnFutureShim(env), client, key, state);
+          retriever.tryRetrieve(env, futuresShim, client, key, state);
       retrievalResult =
           maybeUnwrapVersionedSkyValue(key, retrievalResult, env, analysisCachingDeps);
-      if (retrievalResult instanceof RetrievedValue || retrievalResult instanceof NoCachedData) {
+      if (record
+          && (retrievalResult instanceof RetrievedValue
+              || retrievalResult instanceof NoCachedData)) {
         analysisCachingDeps.recordRetrievalResult(
             retrievalResult, key, state.getPhaseDurationMicros());
       }

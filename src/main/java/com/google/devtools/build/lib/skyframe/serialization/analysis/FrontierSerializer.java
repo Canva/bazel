@@ -50,7 +50,10 @@ import com.google.devtools.build.lib.server.FailureDetails.RemoteAnalysisCaching
 import com.google.devtools.build.lib.server.FailureDetails.RemoteAnalysisCaching.Code;
 import com.google.devtools.build.lib.skyframe.ActionExecutionValue;
 import com.google.devtools.build.lib.skyframe.ActionTemplateExpansionValue.ActionTemplateExpansionKey;
+import com.google.devtools.build.lib.skyframe.BuildDriverKey;
+import com.google.devtools.build.lib.skyframe.BuildDriverValue;
 import com.google.devtools.build.lib.skyframe.BzlLoadValue;
+import com.google.devtools.build.lib.skyframe.ConfiguredTargetKey;
 import com.google.devtools.build.lib.skyframe.SkyFunctions;
 import com.google.devtools.build.lib.skyframe.TopLevelActionLookupKeyWrapper;
 import com.google.devtools.build.lib.skyframe.serialization.FingerprintValueService;
@@ -445,6 +448,12 @@ public final class FrontierSerializer {
                 selection.putIfAbsent(completion, FRONTIER_CANDIDATE);
               }
             }
+            case BuildDriverKey driver
+                when !skycacheAnalysisOnly && traversalMode == TraversalMode.FOR_SERIALIZATION -> {
+              if (isBuiltUnderAnotherKey(driver, node)) {
+                selection.putIfAbsent(driver, FRONTIER_CANDIDATE);
+              }
+            }
             case Artifact artifact
                 when !skycacheAnalysisOnly && traversalMode == TraversalMode.FOR_SERIALIZATION -> {
               SkyKey artifactKey = selectArtifactKey(artifact);
@@ -518,6 +527,12 @@ public final class FrontierSerializer {
                 when !skycacheAnalysisOnly && traversalMode == TraversalMode.FOR_SERIALIZATION -> {
               if (isCompleted(completion, node)) {
                 selection.putIfAbsent(completion, FRONTIER_CANDIDATE);
+              }
+            }
+            case BuildDriverKey driver
+                when !skycacheAnalysisOnly && traversalMode == TraversalMode.FOR_SERIALIZATION -> {
+              if (isBuiltUnderAnotherKey(driver, node)) {
+                selection.putIfAbsent(driver, FRONTIER_CANDIDATE);
               }
             }
             case Artifact artifact
@@ -624,6 +639,30 @@ public final class FrontierSerializer {
     }
     // Null if the target failed to build.
     return node.getValue() != null;
+  }
+
+  /**
+   * Whether {@code node} drove the build of a top-level target that was built under a key other
+   * than the one the build asked for it with, which is then recorded as built under both.
+   *
+   * <p>The two differ whenever the target's rule transitions to another configuration, and that is
+   * nearly every target that is not a test: its configuration has the test options trimmed. The
+   * record of {@link #isCompleted} is under the key the target was built with. A reader knows that
+   * key only once it has the target, and it asks what was built before that, so as to know early
+   * which targets have work to do: see {@link TopLevelAdmission}.
+   */
+  private static boolean isBuiltUnderAnotherKey(BuildDriverKey driver, InMemoryNodeEntry node) {
+    if (!ExecutionValueCaching.completionsEnabled() || !node.isDone()) {
+      return false;
+    }
+    return driver.getActionLookupKey() instanceof ConfiguredTargetKey requested
+        && requested.getLabel() != null
+        // Null if the target failed to build.
+        && node.getValue() instanceof BuildDriverValue driven
+        && !driven.isSkipped()
+        && driven.getWrappedSkyValue() instanceof ConfiguredTargetValue target
+        && !ConfiguredTargetKey.fromConfiguredTarget(target.getConfiguredTarget())
+            .equals(requested);
   }
 
   /** The mnemonic of the action {@code data} is the result of, for a message. */
