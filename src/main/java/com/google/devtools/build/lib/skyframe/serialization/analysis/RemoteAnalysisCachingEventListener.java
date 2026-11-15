@@ -207,6 +207,54 @@ public class RemoteAnalysisCachingEventListener {
     return ImmutableMap.copyOf(missLatenciesBySkyFunctionName);
   }
 
+  /**
+   * Describes how long retrievals took from the first attempt to the result, by function and by
+   * the phase they spent it in: the median, the 99th percentile and the longest, in milliseconds,
+   * each as the upper bound of the bucket it falls in.
+   *
+   * <p>A retrieval that waits tens of seconds for the service to answer is queued behind others.
+   *
+   * @param hits whether to describe the retrievals that found a value or those that did not
+   */
+  public String describeLatencies(boolean hits) {
+    var latencies = hits ? hitLatenciesBySkyFunctionName : missLatenciesBySkyFunctionName;
+    return latencies.entrySet().stream()
+        .sorted(
+            java.util.Comparator.comparing(
+                (java.util.Map.Entry<FunctionAndPhase, DecimalBucketer> e) ->
+                    e.getKey().functionName().getName())
+                .thenComparing(e -> e.getKey().phase()))
+        .map(
+            e -> {
+              var buckets = e.getValue().getBuckets();
+              long total = buckets.stream().mapToLong(b -> b.count()).sum();
+              return String.format(
+                  "%s %s %d/%d/%d (%d)",
+                  e.getKey().functionName().getName(),
+                  e.getKey().phase(),
+                  percentileMillis(buckets, total, 0.5),
+                  percentileMillis(buckets, total, 0.99),
+                  percentileMillis(buckets, total, 1.0),
+                  total);
+            })
+        .collect(java.util.stream.Collectors.joining("; "));
+  }
+
+  private static long percentileMillis(
+      java.util.List<com.google.devtools.build.lib.util.Bucket> buckets,
+      long total,
+      double fraction) {
+    long target = (long) Math.ceil(total * fraction);
+    long seen = 0;
+    for (var bucket : buckets) {
+      seen += bucket.count();
+      if (seen >= target) {
+        return bucket.maxExclusive() / 1000;
+      }
+    }
+    return 0;
+  }
+
   public ImmutableMap<MissReason, AtomicLong> getMissesByReason() {
     return ImmutableMap.copyOf(missesByReason);
   }

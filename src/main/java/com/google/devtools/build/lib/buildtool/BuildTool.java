@@ -1542,6 +1542,17 @@ public class BuildTool {
                     totalRequests,
                     overallHitRate,
                     statsByFunction)));
+    for (boolean hits : new boolean[] {true, false}) {
+      String latencies = listener.describeLatencies(hits);
+      if (!latencies.isEmpty()) {
+        env.getReporter()
+            .handle(
+                Event.info(
+                    String.format(
+                        "Skycache read: time to a %s in ms, median/99%%/longest (count): %s",
+                        hits ? "hit" : "miss", latencies)));
+      }
+    }
   }
 
   /** Formats a number of bytes in a human-readable prefixed format. */
