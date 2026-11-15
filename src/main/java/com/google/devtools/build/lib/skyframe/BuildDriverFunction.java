@@ -294,6 +294,27 @@ public class BuildDriverFunction implements SkyFunction {
       }
     }
 
+    if (admission != null && admission.withoutValues()) {
+      // What stands in for a target or an aspect did not bring its configuration into the graph,
+      // as fetching it would have, and the events below name the configuration.
+      ImmutableSet.Builder<SkyKey> configurations = ImmutableSet.builder();
+      if (topLevelSkyValue instanceof ConfiguredTargetValue target) {
+        if (target.getConfiguredTarget().getConfigurationKey() != null) {
+          configurations.add(target.getConfiguredTarget().getConfigurationKey());
+        }
+      } else if (topLevelSkyValue instanceof TopLevelAspectsValue aspects) {
+        for (AspectKey aspectKey : aspects.getTopLevelAspectsMap().keySet()) {
+          if (aspectKey.getConfigurationKey() != null) {
+            configurations.add(aspectKey.getConfigurationKey());
+          }
+        }
+      }
+      declareDependenciesAndCheckValues(env, configurations.build());
+      if (env.valuesMissing()) {
+        return null;
+      }
+    }
+
     // At this point, the target is considered "analyzed". It's important that this event is sent
     // before the TopLevelEntityAnalysisConcludedEvent: when the last of the analysis work is
     // concluded, we need to have the complete list of analyzed targets ready in
