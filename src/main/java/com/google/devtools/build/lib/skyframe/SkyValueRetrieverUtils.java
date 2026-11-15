@@ -36,6 +36,7 @@ import com.google.devtools.build.lib.skyframe.serialization.SkyValueRetriever.Re
 import com.google.devtools.build.lib.skyframe.serialization.SkyValueRetriever.SerializableSkyKeyComputeState;
 import com.google.devtools.build.lib.skyframe.serialization.analysis.AnalysisValueWithMtsv;
 import com.google.devtools.build.lib.skyframe.serialization.analysis.CompletedTopLevelKey;
+import com.google.devtools.build.lib.skyframe.serialization.analysis.CompletedTopLevelValue;
 import com.google.devtools.build.lib.skyframe.serialization.analysis.ExecutionValueCaching;
 import com.google.devtools.build.lib.skyframe.serialization.analysis.RemoteAnalysisCacheClient;
 import com.google.devtools.build.lib.skyframe.serialization.analysis.RemoteAnalysisCacheReaderDepsProvider;
@@ -88,6 +89,18 @@ public final class SkyValueRetrieverUtils {
       RetrievalResult result, ImmutableMap<RetrievalPhase, Long> phaseDurationMicros) {
     boolean valid() {
       return result instanceof RetrievedValue;
+    }
+
+    /**
+     * The key the target was built with, if the record is valid and gives one: see {@link
+     * CompletedTopLevelValue}.
+     */
+    @Nullable
+    ActionLookupKey builtWith() {
+      return result instanceof RetrievedValue(SkyValue value)
+              && value instanceof CompletedTopLevelValue completed
+          ? completed.builtWith()
+          : null;
     }
   }
 
@@ -155,31 +168,12 @@ public final class SkyValueRetrieverUtils {
    * Has a top-level key take its turn to fetch its value: at once if it has work to do, and
    * otherwise when {@code admission} lets it through. See {@link TopLevelAdmission}.
    *
-   * <p>The key has work to do unless the cache records as built what it is going to be asked for:
-   * every one of {@code completions}, or with {@code alternatives} any one of them, for a caller
-   * that cannot tell yet which it is going to be.
-   *
-   * @param contexts one for each of {@code completions}, kept by the caller between restarts
+   * @param built whether the cache records as built everything the key is going to be asked for,
+   *     so that it has no work to do
    * @return false if the caller is to return null and be restarted
    */
   static boolean takeTurn(
-      ActionLookupKey topLevelKey,
-      List<CompletedTopLevelKey> completions,
-      boolean alternatives,
-      RetrievalContext[] contexts,
-      Environment env,
-      RemoteAnalysisCacheReaderDepsProvider analysisCachingDeps,
-      TopLevelAdmission admission)
-      throws InterruptedException {
-    CompletedProbe[] probes =
-        probeCompleted(completions, contexts, env, analysisCachingDeps, admission);
-    if (probes == null || env.valuesMissing()) {
-      return false;
-    }
-    boolean built = !alternatives;
-    for (CompletedProbe probe : probes) {
-      built = alternatives ? built || probe.valid() : built && probe.valid();
-    }
+      ActionLookupKey topLevelKey, boolean built, Environment env, TopLevelAdmission admission) {
     if (!built) {
       admission.noteHasWork(topLevelKey);
       return true;

@@ -26,6 +26,7 @@ import com.google.devtools.build.lib.analysis.AliasProvider;
 import com.google.devtools.build.lib.analysis.AspectCollection;
 import com.google.devtools.build.lib.analysis.AspectResolutionHelpers;
 import com.google.devtools.build.lib.analysis.AspectValue;
+import com.google.devtools.build.lib.analysis.ConfiguredAspect;
 import com.google.devtools.build.lib.analysis.ConfiguredRuleClassProvider;
 import com.google.devtools.build.lib.analysis.ConfiguredTargetValue;
 import com.google.devtools.build.lib.analysis.InconsistentAspectOrderException;
@@ -178,14 +179,34 @@ final class ToplevelStarlarkAspectFunction implements SkyFunction {
       for (AspectKey aspectKey : aspectsKeys) {
         completions.add(CompletedTopLevelKey.of(aspectKey, topLevelContext, /* willTest= */ false));
       }
-      if (!SkyValueRetrieverUtils.takeTurn(
-          topLevelAspectsKey,
-          completions.build(),
-          /* alternatives= */ false,
-          state.completedProbes,
-          env,
-          analysisCachingDepsSupplier.get(),
-          admission)) {
+      SkyValueRetrieverUtils.CompletedProbe[] probes =
+          SkyValueRetrieverUtils.probeCompleted(
+              completions.build(),
+              state.completedProbes,
+              env,
+              analysisCachingDepsSupplier.get(),
+              admission);
+      if (probes == null || env.valuesMissing()) {
+        return null;
+      }
+      boolean built = true;
+      for (SkyValueRetrieverUtils.CompletedProbe probe : probes) {
+        built &= probe.valid();
+      }
+      if (built && admission.withoutValues()) {
+        TopLevelAspectsValue standIn =
+            builtWithoutTheirValues(aspectsKeys, loadAspectsValue.getAspects(), admission);
+        if (standIn != null) {
+          // Nothing in the graph ties this value to the sources the records depend on, so it is
+          // made to depend on the build, and the records are asked for again in every build.
+          PrecomputedValue.BUILD_ID.get(env);
+          if (env.valuesMissing()) {
+            return null;
+          }
+          return standIn;
+        }
+      }
+      if (!SkyValueRetrieverUtils.takeTurn(topLevelAspectsKey, built, env, admission)) {
         return null;
       }
     }
@@ -214,6 +235,45 @@ final class ToplevelStarlarkAspectFunction implements SkyFunction {
       }
     }
     return new TopLevelAspectsValue(valuesMap.buildOrThrow());
+  }
+
+  /**
+   * Returns aspects that provide nothing to stand in for ones a reader of the analysis cache found
+   * recorded as built, which it then does not fetch, or null if one of them cannot be stood in
+   * for. Nothing reads what an aspect provides in a build that reports it as built without asking
+   * for its artifacts.
+   */
+  @Nullable
+  private static TopLevelAspectsValue builtWithoutTheirValues(
+      ImmutableList<AspectKey> aspectsKeys,
+      ImmutableList<Aspect> aspects,
+      TopLevelAdmission admission) {
+    ImmutableMap.Builder<AspectKey, AspectValue> standIns =
+        ImmutableMap.builderWithExpectedSize(aspectsKeys.size());
+    for (AspectKey aspectKey : aspectsKeys) {
+      Aspect aspect = null;
+      for (Aspect candidate : aspects) {
+        if (candidate.getDescriptor().equals(aspectKey.getAspectDescriptor())) {
+          aspect = candidate;
+          break;
+        }
+      }
+      if (aspect == null) {
+        return null;
+      }
+      standIns.put(
+          aspectKey,
+          (AspectValue)
+              admission.putBuiltValue(
+                  aspectKey,
+                  AspectValue.create(
+                      aspectKey,
+                      aspect,
+                      ConfiguredAspect.NonApplicableAspect.INSTANCE,
+                      /* transitivePackages= */ null),
+                  /* aspect= */ true));
+    }
+    return new TopLevelAspectsValue(standIns.buildOrThrow());
   }
 
   private static Target getTarget(PackageValue packageValue, Label targetLabel)

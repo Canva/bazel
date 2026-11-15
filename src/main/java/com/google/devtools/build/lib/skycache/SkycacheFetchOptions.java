@@ -98,4 +98,18 @@ public abstract class SkycacheFetchOptions extends OptionsBase {
               + " read. Zero asks for everything at once, in the order of the build."
               + " Experimental.")
   public abstract int getTopLevelWindow();
+
+  @Option(
+      name = "canva_skycache_built_without_values",
+      defaultValue = "false",
+      documentationCategory = OptionDocumentationCategory.UNDOCUMENTED,
+      effectTags = {OptionEffectTag.BAZEL_INTERNAL_CONFIGURATION},
+      help =
+          "With --canva_skycache_completions and a --canva_skycache_top_level_window, a reader"
+              + " reports a top-level target that is recorded as built, and is not going to be"
+              + " tested, without fetching the target, and a top-level aspect likewise. Their"
+              + " providers and actions are most of what a reader of a large build fetches, and"
+              + " nothing reads them in a build that only reports what builds. The targets the"
+              + " build result holds then provide nothing. Experimental.")
+  public abstract boolean getBuiltWithoutValues();
 }

@@ -99,7 +99,15 @@ public final class ExecutionValueCaching {
    * built. See {@link TopLevelAdmission}.
    */
   public static void resetTopLevelAdmission(int window) {
-    topLevelAdmission = window > 0 ? new TopLevelAdmission(window) : null;
+    resetTopLevelAdmission(window, /* withoutValues= */ false);
+  }
+
+  /**
+   * @param withoutValues whether a reader also reports a target or aspect that is recorded as
+   *     built without fetching it
+   */
+  public static void resetTopLevelAdmission(int window, boolean withoutValues) {
+    topLevelAdmission = window > 0 ? new TopLevelAdmission(window, withoutValues) : null;
   }
 
   /** The admission of this command's top-level keys, or null if they are not ordered. */

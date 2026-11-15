@@ -165,7 +165,10 @@ public final class CompletionFunction<
   public SkyValue compute(SkyKey skyKey, Environment env)
       throws CompletionFunctionException, InterruptedException {
     KeyT key = (KeyT) skyKey;
-    Pair<ValueT, ArtifactsToBuild> valueAndArtifactsToBuild = getValueAndArtifactsToBuild(key, env);
+    Pair<ValueT, ArtifactsToBuild> valueAndArtifactsToBuild = builtWithoutItsValue(key);
+    if (valueAndArtifactsToBuild == null) {
+      valueAndArtifactsToBuild = getValueAndArtifactsToBuild(key, env);
+    }
     if (env.valuesMissing()) {
       return null;
     }
@@ -530,6 +533,34 @@ public final class CompletionFunction<
       throw new CompletionFunctionException(
           new TopLevelOutputException(e.getMessage(), e.getDetailedExitCode()));
     }
+  }
+
+  /**
+   * Returns what stands in for the target or aspect of {@code key} if a reader of the analysis
+   * cache found it recorded as built and did not fetch it, with no artifacts to build, or null if
+   * it is to be asked for. See {@link TopLevelAdmission}.
+   */
+  @Nullable
+  @SuppressWarnings("unchecked") // What is kept for a key is a value of the key's kind.
+  private Pair<ValueT, ArtifactsToBuild> builtWithoutItsValue(KeyT key) {
+    TopLevelAdmission admission = ExecutionValueCaching.topLevelAdmission();
+    if (admission == null || (key instanceof TargetCompletionKey target && target.willTest())) {
+      return null;
+    }
+    Object standIn = admission.builtValue(key.actionLookupKey());
+    if (standIn == null) {
+      return null;
+    }
+    // The record is what says it is built, and is acted on below as for any other.
+    return admission.probed(
+                    CompletedTopLevelKey.of(
+                        key.actionLookupKey(),
+                        key.topLevelArtifactContext(),
+                        /* willTest= */ false))
+                instanceof SkyValueRetrieverUtils.CompletedProbe probe
+            && probe.valid()
+        ? Pair.of((ValueT) standIn, ArtifactsToBuild.none())
+        : null;
   }
 
   /** What a lookup of a {@link CompletedTopLevelKey} keeps between restarts. */

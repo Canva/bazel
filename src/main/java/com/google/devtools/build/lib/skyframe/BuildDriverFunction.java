@@ -146,8 +146,11 @@ public class BuildDriverFunction implements SkyFunction {
 
     private TestType testType;
 
-    /** Of the lookups that say whether the target was built, with and without testing it. */
+    /** Of the lookup that says whether the target was built. */
     @Nullable private RetrievalContext[] completedProbes;
+
+    /** What the target's label says about testing it, known before the target is. */
+    @Nullable private TestType testTypeByLabel;
 
     @Override
     public void close() {
@@ -199,26 +202,50 @@ public class BuildDriverFunction implements SkyFunction {
     // them, which does the same for them.
     TopLevelAdmission admission =
         SkyValueRetrieverUtils.topLevelAdmission(analysisCachingDepsSupplier, env);
+    // What stands in for the target, if it is recorded as built and is not fetched at all.
+    SkyValue builtAlready = null;
     if (admission != null && !env.valuesMissing()) {
       admission.setTopLevelContext(topLevelArtifactContext);
       if (actionLookupKey instanceof ConfiguredTargetKey) {
         if (state.completedProbes == null) {
-          state.completedProbes =
-              new RetrievalContext[] {new RetrievalContext(), new RetrievalContext()};
+          state.completedProbes = new RetrievalContext[] {new RetrievalContext()};
         }
-        // Whether the target is going to be tested is not known without it.
-        if (!SkyValueRetrieverUtils.takeTurn(
-            actionLookupKey,
-            ImmutableList.of(
-                CompletedTopLevelKey.of(
-                    actionLookupKey, topLevelArtifactContext, /* willTest= */ true),
-                CompletedTopLevelKey.of(
-                    actionLookupKey, topLevelArtifactContext, /* willTest= */ false)),
-            /* alternatives= */ true,
-            state.completedProbes,
-            env,
-            analysisCachingDepsSupplier.get(),
-            admission)) {
+        // Whether a target is going to be tested is decided from its label, so it is known
+        // before the target is. An alias has the label of what it points to, and may be asked
+        // about under the wrong record here; its completion function then asks again.
+        if (state.testTypeByLabel == null) {
+          state.testTypeByLabel =
+              testTypeResolver
+                  .get()
+                  .determineTestType(
+                      new BuiltTopLevelTargetValue(actionLookupKey).getConfiguredTarget());
+        }
+        boolean willTest = isTest(state.testTypeByLabel);
+        SkyValueRetrieverUtils.CompletedProbe[] probes =
+            SkyValueRetrieverUtils.probeCompleted(
+                ImmutableList.of(
+                    CompletedTopLevelKey.of(actionLookupKey, topLevelArtifactContext, willTest)),
+                state.completedProbes,
+                env,
+                analysisCachingDepsSupplier.get(),
+                admission);
+        if (probes == null || env.valuesMissing()) {
+          return null;
+        }
+        ActionLookupKey builtWith =
+            !willTest && admission.withoutValues() ? probes[0].builtWith() : null;
+        if (builtWith != null) {
+          // Nothing reads what a target provides in a build that reports it as built without
+          // asking for its artifacts, and that is most of what there is to fetch.
+          builtAlready =
+              (SkyValue)
+                  admission.putBuiltValue(
+                      builtWith, new BuiltTopLevelTargetValue(builtWith), /* aspect= */ false);
+          admission.shareProbe(
+              CompletedTopLevelKey.of(builtWith, topLevelArtifactContext, /* willTest= */ false),
+              probes[0]);
+        } else if (!SkyValueRetrieverUtils.takeTurn(
+            actionLookupKey, probes[0].valid(), env, admission)) {
           return null;
         }
       }
@@ -229,7 +256,10 @@ public class BuildDriverFunction implements SkyFunction {
     // (e.g. ConfiguredTargetKey -> NonRuleConfiguredTargetValue).
     SkyValue topLevelSkyValue;
     try {
-      topLevelSkyValue = env.getValueOrThrow(actionLookupKey, AbstractSaneAnalysisException.class);
+      topLevelSkyValue =
+          builtAlready != null
+              ? builtAlready
+              : env.getValueOrThrow(actionLookupKey, AbstractSaneAnalysisException.class);
     } catch (AbstractSaneAnalysisException e) {
       if (admission != null) {
         admission.release(actionLookupKey);
@@ -242,7 +272,7 @@ public class BuildDriverFunction implements SkyFunction {
     if (env.valuesMissing()) {
       return null;
     }
-    if (admission != null) {
+    if (admission != null && builtAlready == null) {
       admission.release(actionLookupKey);
       if (topLevelSkyValue instanceof ConfiguredTargetValue target) {
         // The completion function asks for the record under the key the target was built with,
@@ -276,8 +306,10 @@ public class BuildDriverFunction implements SkyFunction {
           env, (TopLevelAspectsValue) topLevelSkyValue, postedEventsTypes);
     }
 
-    // We only check for action conflict once per BuildDriverKey.
-    if (Preconditions.checkNotNull(shouldCheckForConflictWithTraversal).get()
+    // We only check for action conflict once per BuildDriverKey. What stands in for a target that
+    // was not fetched has no actions, and no node to start from.
+    if (builtAlready == null
+        && Preconditions.checkNotNull(shouldCheckForConflictWithTraversal).get()
         && checkedForConflicts.add(buildDriverKey)) {
       try (SilentCloseable c =
           Profiler.instance().profile("BuildDriverFunction.checkActionConflicts")) {
@@ -333,6 +365,10 @@ public class BuildDriverFunction implements SkyFunction {
         return null;
       }
 
+      if (builtAlready != null) {
+        // Built by the writer in this configuration, which an incompatible target is not.
+        state.checkedForCompatibility = true;
+      }
       if (!state.checkedForCompatibility) {
         try {
           Boolean isConfiguredTargetCompatible =

@@ -81,8 +81,43 @@ public final class TopLevelAdmission {
     private boolean released;
   }
 
-  public TopLevelAdmission(int window) {
+  /** Whether a target or aspect recorded as built is reported as built without being fetched. */
+  private final boolean withoutValues;
+
+  /** What stands in for each such target or aspect, by its key. */
+  private final ConcurrentHashMap<Object, Object> builtValues = new ConcurrentHashMap<>();
+
+  private final AtomicLong builtTargets = new AtomicLong();
+  private final AtomicLong builtAspects = new AtomicLong();
+
+  public TopLevelAdmission(int window, boolean withoutValues) {
     this.window = window;
+    this.withoutValues = withoutValues;
+  }
+
+  public boolean withoutValues() {
+    return withoutValues;
+  }
+
+  /**
+   * Keeps what stands in for a top-level target or aspect that is recorded as built, for the
+   * function that reports it as built, which then does not ask for the target or aspect.
+   *
+   * @return what stands in for it, which is {@code value} unless there was one already
+   */
+  public Object putBuiltValue(Object key, Object value, boolean aspect) {
+    Object previous = builtValues.putIfAbsent(key, value);
+    if (previous != null) {
+      return previous;
+    }
+    (aspect ? builtAspects : builtTargets).incrementAndGet();
+    return value;
+  }
+
+  /** What {@link #putBuiltValue} kept for the key, or null. */
+  @Nullable
+  public Object builtValue(Object key) {
+    return builtValues.get(key);
   }
 
   public void setTopLevelContext(Object context) {
@@ -211,6 +246,12 @@ public final class TopLevelAdmission {
     synchronized (this) {
       peak = peakWaiting;
     }
+    String without =
+        builtValues.isEmpty()
+            ? ""
+            : String.format(
+                "; %d targets and %d aspects reported as built without being fetched",
+                builtTargets.get(), builtAspects.get());
     return String.format(
         "%d records of built top-level targets and aspects asked for first, %d valid, the last"
             + " answered %.1f s into the command; %d top-level keys had work to do, the first"
@@ -224,7 +265,8 @@ public final class TopLevelAdmission {
         admitted.get(),
         window,
         seconds(lastReleaseNanos.get()),
-        peak);
+        peak)
+        + without;
   }
 
   private double seconds(long nanos) {

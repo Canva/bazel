@@ -33,6 +33,7 @@ import com.google.devtools.build.lib.actions.ActionLookupData;
 import com.google.devtools.build.lib.actions.ActionLookupKey;
 import com.google.devtools.build.lib.actions.ActionLookupSummaryKey;
 import com.google.devtools.build.lib.actions.Artifact.DerivedArtifact;
+import com.google.devtools.build.lib.analysis.ConfiguredTarget;
 import com.google.devtools.build.lib.analysis.ConfiguredTargetValue;
 import com.google.devtools.build.lib.cmdline.PackageIdentifier;
 import com.google.devtools.build.lib.compress.CompressionService;
@@ -428,12 +429,11 @@ final class SelectedEntrySerializer {
           // FrontierSerializer#isCompleted. Recorded under a key of its own, with the file
           // dependencies of the target or aspect as an action's result has them.
           serializationStats.registerExecutionNode();
+          boolean willTest = completion instanceof TargetCompletionKey target && target.willTest();
           uploadEntry(
               CompletedTopLevelKey.of(
-                  completion.actionLookupKey(),
-                  completion.topLevelArtifactContext(),
-                  completion instanceof TargetCompletionKey target && target.willTest()),
-              CompletedTopLevelValue.INSTANCE,
+                  completion.actionLookupKey(), completion.topLevelArtifactContext(), willTest),
+              completedValue(completion.actionLookupKey(), willTest),
               completion.actionLookupKey(),
               /* dependencyDeps= */ null,
               /* mtsv= */ null);
@@ -460,7 +460,7 @@ final class SelectedEntrySerializer {
                     driver.getActionLookupKey(),
                     driver.getTopLevelArtifactContext(),
                     built.willTest()),
-                CompletedTopLevelValue.INSTANCE,
+                completedValue(built.actionLookupKey(), built.willTest()),
                 built.actionLookupKey(),
                 /* dependencyDeps= */ null,
                 /* mtsv= */ null);
@@ -474,6 +474,32 @@ final class SelectedEntrySerializer {
     } catch (Throwable t) {
       writeStatuses.selectedEntryFailed(t);
     }
+  }
+
+  /**
+   * What is recorded for a top-level target or aspect that was built: for a rule's target that
+   * was not tested, the key it was built with as well. See {@link CompletedTopLevelValue}.
+   */
+  private CompletedTopLevelValue completedValue(ActionLookupKey builtWith, boolean willTest) {
+    if (willTest || !(builtWith instanceof ConfiguredTargetKey)) {
+      return CompletedTopLevelValue.INSTANCE;
+    }
+    InMemoryNodeEntry node = graph.getIfPresent(builtWith);
+    if (node == null
+        || !node.isDone()
+        || !(node.getValue() instanceof ConfiguredTargetValue value)) {
+      return CompletedTopLevelValue.INSTANCE;
+    }
+    ConfiguredTarget target = value.getConfiguredTarget();
+    // An alias has the label of what it points to, and a reader that has only the alias's key
+    // cannot stand in for it.
+    if (target == null
+        || !target.isRuleConfiguredTarget()
+        || !target.getLabel().equals(target.getOriginalLabel())
+        || !builtWith.equals(target.getLookupKey())) {
+      return CompletedTopLevelValue.INSTANCE;
+    }
+    return CompletedTopLevelValue.builtWith(builtWith);
   }
 
   /**

@@ -676,12 +676,19 @@ public final class SkycacheExecutionIntegrationTest extends BuildIntegrationTest
   }
 
   private void downloadCompletedScenario() throws Exception {
+    downloadCompletedScenario(/* withoutValues= */ false);
+  }
+
+  /**
+   * @param withoutValues whether the reader reports what is recorded as built without fetching it
+   */
+  private void downloadCompletedScenario(boolean withoutValues) throws Exception {
     getSkyframeExecutor().resetEvaluator();
     getDirectories().getExecRoot(TestConstants.WORKSPACE_NAME).getRelative("bazel-out")
         .deleteTree();
     ExecutionValueCaching.resetTestResultOutcomes();
     // One at a time, so that every target with nothing to build waits for the one before it.
-    ExecutionValueCaching.resetTopLevelAdmission(1);
+    ExecutionValueCaching.resetTopLevelAdmission(1, withoutValues);
     addOptions("--experimental_remote_analysis_cache_mode=download");
     buildTarget("//same:c", "//same:t", "//other:f");
   }
@@ -693,9 +700,8 @@ public final class SkycacheExecutionIntegrationTest extends BuildIntegrationTest
     downloadCompletedScenario();
 
     assertThat(ExecutionValueCaching.completionOutcomes()).isEqualTo("6 taken from the cache");
-    // Asked for each target as built and as tested, of which it was one, and for each aspect.
     assertThat(ExecutionValueCaching.topLevelAdmissionSummary())
-        .startsWith("9 records of built top-level targets and aspects asked for first, 6 valid");
+        .startsWith("6 records of built top-level targets and aspects asked for first, 6 valid");
     assertThat(ExecutionValueCaching.topLevelAdmissionSummary())
         .contains(" 0 top-level keys had work to do");
     assertThat(ExecutionValueCaching.topLevelAdmissionSummary())
@@ -715,6 +721,54 @@ public final class SkycacheExecutionIntegrationTest extends BuildIntegrationTest
     assertThat(ExecutionValueCaching.completionOutcomes()).contains("not cached");
     assertThat(ExecutionValueCaching.topLevelAdmissionSummary())
         .doesNotContain(" 0 top-level keys had work to do");
+  }
+
+  @Test
+  public void completions_readerWithoutValues_nothingToBuildAndNothingFetched() throws Exception {
+    uploadCompletedScenario();
+
+    downloadCompletedScenario(/* withoutValues= */ true);
+
+    assertThat(ExecutionValueCaching.completionOutcomes()).isEqualTo("6 taken from the cache");
+    assertThat(ExecutionValueCaching.topLevelAdmissionSummary())
+        .contains(" 0 top-level keys had work to do");
+    assertThat(ExecutionValueCaching.topLevelAdmissionSummary())
+        .endsWith("3 targets and 3 aspects reported as built without being fetched");
+    // Neither the targets nor the aspects were asked for.
+    assertThat(
+            getCommandEnvironment().getRemoteAnalysisCachingEventListener().getCacheHits().stream()
+                .filter(ActionLookupKey.class::isInstance)
+                .toList())
+        .isEmpty();
+  }
+
+  @Test
+  public void completions_readerWithoutValues_buildsWhatChanged() throws Exception {
+    uploadCompletedScenario();
+
+    clientChanges = ImmutableList.of("other/f.txt");
+    downloadCompletedScenario(/* withoutValues= */ true);
+
+    assertThat(output("same", "c.txt")).isEqualTo("a.txt\nb.txt\n");
+    assertThat(ExecutionValueCaching.completionOutcomes()).contains("taken from the cache");
+    assertThat(ExecutionValueCaching.completionOutcomes()).contains("not cached");
+    assertThat(ExecutionValueCaching.topLevelAdmissionSummary())
+        .contains("reported as built without being fetched");
+  }
+
+  @Test
+  public void completions_readerWithoutValues_secondBuildOnTheSameServer() throws Exception {
+    uploadCompletedScenario();
+    downloadCompletedScenario(/* withoutValues= */ true);
+
+    // The graph is kept: what stood in for the targets and aspects is still in it.
+    ExecutionValueCaching.resetTestResultOutcomes();
+    ExecutionValueCaching.resetTopLevelAdmission(1, /* withoutValues= */ true);
+    clientChanges = ImmutableList.of("other/f.txt");
+    buildTarget("//same:c", "//same:t", "//other:f");
+
+    assertThat(output("same", "c.txt")).isEqualTo("a.txt\nb.txt\n");
+    assertThat(ExecutionValueCaching.completionOutcomes()).contains("not cached");
   }
 
   @Test

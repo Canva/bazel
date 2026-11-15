@@ -16,7 +16,6 @@ package com.google.devtools.build.lib.skyframe;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
 
 import com.google.common.base.Stopwatch;
-import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.eventbus.AllowConcurrentEvents;
@@ -41,6 +40,7 @@ import com.google.devtools.build.lib.skyframe.TopLevelStatusEvents.TopLevelTarge
 import com.google.devtools.build.lib.skyframe.TopLevelStatusEvents.TopLevelTargetBuiltEvent;
 import com.google.devtools.build.lib.skyframe.TopLevelStatusEvents.TopLevelTargetSkippedEvent;
 import com.google.errorprone.annotations.concurrent.GuardedBy;
+import java.util.Arrays;
 import java.util.Comparator;
 import java.util.Map;
 import java.util.Set;
@@ -87,7 +87,7 @@ public class BuildResultListener {
       new SortedCopy<>(
           analyzedAspects::size,
           () ->
-              analyzedAspects.entrySet().stream()
+              analyzedAspects.entrySet().parallelStream()
                   .sorted(Map.Entry.comparingByKey(AspectKey.ORDERING))
                   .collect(toImmutableMap(Map.Entry::getKey, Map.Entry::getValue)),
           ImmutableMap::size);
@@ -175,8 +175,16 @@ public class BuildResultListener {
     return sortedBuiltAspects.get();
   }
 
+  /**
+   * Sorts on every core: comparing two targets compares their labels and configurations, and one
+   * thread took six seconds over the 1.2 million top-level targets and aspects of a large build,
+   * at the end of it, with the others idle.
+   */
+  @SuppressWarnings("unchecked") // The array holds the elements of the set.
   private static <T> ImmutableSet<T> sortedCopyOf(Comparator<T> comparator, Set<T> set) {
-    return ImmutableSet.copyOf(ImmutableList.sortedCopyOf(comparator, set));
+    T[] elements = (T[]) set.toArray();
+    Arrays.parallelSort(elements, comparator);
+    return ImmutableSet.copyOf(elements);
   }
 
   /**
