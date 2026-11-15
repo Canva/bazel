@@ -329,6 +329,11 @@ public final class IncrementalArtifactConflictFinder {
   @Nullable
   private ActionConflictsAndStats checkSmallClosure(ActionLookupKey root)
       throws InterruptedException {
+    // The sequence this stands in for waits for another thread, and so finds out that the calling
+    // thread was interrupted. A build interrupted during analysis relies on that.
+    if (Thread.interrupted()) {
+      throw new InterruptedException();
+    }
     ArrayList<ActionLookupKey> closure = new ArrayList<>();
     closure.add(root);
     Set<ActionLookupKey> seen = new HashSet<>();
