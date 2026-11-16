@@ -21,7 +21,6 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.io.PrintWriter;
 import java.util.EnumSet;
-import java.util.regex.Pattern;
 
 /**
  * Allows to print "colored" strings by parsing predefined string keywords,
@@ -45,10 +44,6 @@ public class AnsiTerminalPrinter {
   private static final String MODE_PREFIX = "{#";
   private static final String MODE_SUFFIX = "#}";
 
-  // Mode pattern must match MODE_PREFIX and do lookahead for the rest of the
-  // mode string.
-  private static final String MODE_PATTERN = "\\{\\#(?=[A-Z]+\\#\\})";
-
   /**
    * List of supported coloring modes for the {@link AnsiTerminalPrinter}.
    */
@@ -66,7 +61,6 @@ public class AnsiTerminalPrinter {
 
   private static final GoogleLogger logger = GoogleLogger.forEnclosingClass();
   private static final EnumSet<Mode> MODES = EnumSet.allOf(Mode.class);
-  private static final Pattern PATTERN = Pattern.compile(MODE_PATTERN);
 
   private final OutputStream stream;
   private final ByteArrayOutputStream held = new ByteArrayOutputStream();
@@ -100,23 +94,21 @@ public class AnsiTerminalPrinter {
    * See class documentation for details.
    */
   public void print(String str) {
-    for (String part : PATTERN.split(str)) {
-      int index = part.indexOf(MODE_SUFFIX);
-      // Mode name will contain at least one character, so suffix index
-      // must be at least 1. If it isn't then there is no match.
-      if (index > 1) {
-        for (Mode mode : MODES) {
-          if (index == mode.name().length() && part.startsWith(mode.name())) {
-            setupTerminal(mode);
-            part = part.substring(index + MODE_SUFFIX.length());
-            break;
-          }
-        }
+    // Split at each prefix that capital letters and the suffix follow, which is where a mode
+    // keyword starts. Not with a regular expression: the summary of a large build is megabytes
+    // in one string, and matching a lookahead at every character of it took longer than
+    // everything else done with it.
+    int start = 0;
+    for (int at = str.indexOf(MODE_PREFIX); at >= 0; ) {
+      if (startsKeyword(str, at + MODE_PREFIX.length())) {
+        printPart(str.substring(start, at));
+        start = at + MODE_PREFIX.length();
+        at = str.indexOf(MODE_PREFIX, start);
+      } else {
+        at = str.indexOf(MODE_PREFIX, at + 1);
       }
-      writer.print(part);
-      // Into the buffer, ahead of the coloring sequence the next part may start with.
-      writer.flush();
     }
+    printPart(start == 0 ? str : str.substring(start));
     try {
       held.writeTo(stream);
       stream.flush();
@@ -125,6 +117,34 @@ public class AnsiTerminalPrinter {
     } finally {
       held.reset();
     }
+  }
+
+  /** Whether capital letters and then {@link #MODE_SUFFIX} are at {@code from}. */
+  private static boolean startsKeyword(String str, int from) {
+    int end = from;
+    while (end < str.length() && str.charAt(end) >= 'A' && str.charAt(end) <= 'Z') {
+      end++;
+    }
+    return end > from && str.startsWith(MODE_SUFFIX, end);
+  }
+
+  /** Prints what follows a mode prefix, or the start of a string: a mode's name first, if any. */
+  private void printPart(String part) {
+    int index = part.indexOf(MODE_SUFFIX);
+    // Mode name will contain at least one character, so suffix index
+    // must be at least 1. If it isn't then there is no match.
+    if (index > 1) {
+      for (Mode mode : MODES) {
+        if (index == mode.name().length() && part.startsWith(mode.name())) {
+          setupTerminal(mode);
+          part = part.substring(index + MODE_SUFFIX.length());
+          break;
+        }
+      }
+    }
+    writer.print(part);
+    // Into the buffer, ahead of the coloring sequence the next part may start with.
+    writer.flush();
   }
 
   public void printLn(String str) {
