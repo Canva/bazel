@@ -57,6 +57,7 @@ import com.google.devtools.build.lib.actions.Artifact.RunfilesArtifact;
 import com.google.devtools.build.lib.actions.Artifact.TreeArtifact;
 import com.google.devtools.build.lib.actions.Artifact.UnresolvedSymlinkArtifact;
 import com.google.devtools.build.lib.actions.ArtifactPathResolver;
+import com.google.devtools.build.lib.actions.FileArtifactValue;
 import com.google.devtools.build.lib.actions.FileStateType;
 import com.google.devtools.build.lib.actions.InputMetadataProvider;
 import com.google.devtools.build.lib.actions.LostInputsExecException;
@@ -521,6 +522,11 @@ public final class MerkleTreeComputer {
       @Nullable RemoteActionExecutionContext remoteActionExecutionContext,
       BlobPolicy blobPolicy)
       throws IOException {
+    // Whether a source artifact is a directory, which requires a precomputed subtree, is only
+    // known from its metadata. That metadata is kept here, by the position of the artifact in
+    // sortedInputs, so that building the tree doesn't have to look it up a second time. This is one
+    // reference per input, as much as sortedInputs itself, and is released when the tree is built.
+    var sourceArtifactMetadata = new FileArtifactValue[sortedInputs.size()];
     var subTreesFuture =
         precomputeSubTrees(
             sortedInputs,
@@ -528,6 +534,7 @@ public final class MerkleTreeComputer {
             getInput,
             isToolInput,
             metadataProvider,
+            sourceArtifactMetadata,
             artifactPathResolver,
             remoteActionExecutionContext,
             blobPolicy);
@@ -543,6 +550,7 @@ public final class MerkleTreeComputer {
                 isToolInput,
                 spawnScrubber,
                 metadataProvider,
+                sourceArtifactMetadata,
                 artifactPathResolver,
                 blobPolicy);
           } catch (IOException e) {
@@ -562,6 +570,7 @@ public final class MerkleTreeComputer {
       Predicate<PathFragment> isToolInput,
       @Nullable SpawnScrubber spawnScrubber,
       InputMetadataProvider metadataProvider,
+      FileArtifactValue[] sourceArtifactMetadata,
       ArtifactPathResolver artifactPathResolver,
       BlobPolicy blobPolicy)
       throws IOException, InterruptedException {
@@ -585,7 +594,9 @@ public final class MerkleTreeComputer {
     PathFragment currentParent = PathFragment.EMPTY_FRAGMENT;
     PathFragment lastSourceDirPath = null;
     PathFragment lastPath = null;
+    int index = -1;
     for (T rawInput : sortedInputs) {
+      index++;
       if (Thread.interrupted()) {
         throw new InterruptedException();
       }
@@ -667,11 +678,14 @@ public final class MerkleTreeComputer {
           inputFiles++;
         }
         case Artifact fileOrSourceDirectory -> {
-          var metadata =
-              checkNotNull(
-                  metadataProvider.getInputMetadata(fileOrSourceDirectory),
-                  "missing metadata: %s",
-                  fileOrSourceDirectory);
+          var metadata = sourceArtifactMetadata[index];
+          if (metadata == null) {
+            metadata =
+                checkNotNull(
+                    metadataProvider.getInputMetadata(fileOrSourceDirectory),
+                    "missing metadata: %s",
+                    fileOrSourceDirectory);
+          }
           if (metadata.getType() == FileStateType.DIRECTORY) {
             var subTreeRoot =
                 Preconditions.checkNotNull(
@@ -828,19 +842,24 @@ public final class MerkleTreeComputer {
       Function<? super T, ? extends ActionInput> getInput,
       Predicate<PathFragment> isToolInput,
       InputMetadataProvider metadataProvider,
+      FileArtifactValue[] sourceArtifactMetadata,
       ArtifactPathResolver artifactPathResolver,
       RemoteActionExecutionContext remoteActionExecutionContext,
       BlobPolicy blobPolicy)
       throws IOException {
     List<ListenableFuture<Map.Entry<T, MerkleTree.RootOnly>>> subTreeFutures = null;
+    int index = -1;
     for (T rawInput : sortedInputs) {
+      index++;
       var future =
           maybeCacheSubtree(
               rawInput,
+              index,
               getPath,
               getInput,
               isToolInput,
               metadataProvider,
+              sourceArtifactMetadata,
               artifactPathResolver,
               remoteActionExecutionContext,
               blobPolicy);
@@ -869,10 +888,12 @@ public final class MerkleTreeComputer {
   @Nullable
   private <T> ListenableFuture<MerkleTree.RootOnly> maybeCacheSubtree(
       T rawInput,
+      int index,
       Function<? super T, PathFragment> getPath,
       Function<? super T, ? extends ActionInput> getInput,
       Predicate<PathFragment> isToolInput,
       InputMetadataProvider metadataProvider,
+      FileArtifactValue[] sourceArtifactMetadata,
       ArtifactPathResolver artifactPathResolver,
       @Nullable RemoteActionExecutionContext remoteActionExecutionContext,
       BlobPolicy blobPolicy)
@@ -901,6 +922,7 @@ public final class MerkleTreeComputer {
         var metadata =
             checkNotNull(
                 metadataProvider.getInputMetadata(artifact), "missing metadata: %s", artifact);
+        sourceArtifactMetadata[index] = metadata;
         if (metadata.getType() != FileStateType.DIRECTORY) {
           yield null;
         }
