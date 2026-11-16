@@ -39,6 +39,7 @@ import com.google.devtools.build.lib.actions.Artifact.SourceArtifact;
 import com.google.devtools.build.lib.analysis.ConfiguredTarget;
 import com.google.devtools.build.lib.analysis.ConfiguredTargetValue;
 import com.google.devtools.build.lib.analysis.TopLevelArtifactContext;
+import com.google.devtools.build.lib.analysis.test.ServedTest;
 import com.google.devtools.build.lib.analysis.configuredtargets.InputFileConfiguredTarget;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.cmdline.PackageIdentifier;
@@ -84,6 +85,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -710,14 +712,19 @@ public final class FrontierSerializer {
   record BuiltPackage(
       CompletedPackageKey key, CompletedPackageValue value, ImmutableList<SkyKey> dependsOn) {}
 
+  /**
+   * @param served what a reader needs to report the target's tests, or null if it was not tested
+   */
   private record BuiltTarget(
       ConfiguredTargetKey requested,
       ConfiguredTargetKey builtWith,
-      TopLevelArtifactContext context) {}
+      TopLevelArtifactContext context,
+      @Nullable ServedTest served) {}
 
   /**
-   * Groups the top-level targets that were built, not tested, and had every one of their top-level
-   * aspects built, by package.
+   * Groups the top-level targets that were built and had every one of their top-level aspects
+   * built, by package. One that was tested is among them if every result of its tests is one a
+   * reader can take.
    */
   private static ImmutableList<BuiltPackage> computeBuiltPackages(InMemoryGraph graph) {
     if (!ExecutionValueCaching.completionsEnabled()) {
@@ -739,10 +746,10 @@ public final class FrontierSerializer {
                     aspectsKey.getBaseConfiguredTargetKey(),
                     built ? Optional.of(aspectsKey) : Optional.empty());
             case ConfiguredTargetKey requested when built && requested.getLabel() != null -> {
-              ConfiguredTargetKey builtWith = builtAndNotTested(node);
-              if (builtWith != null) {
-                targets.add(
-                    new BuiltTarget(requested, builtWith, driver.getTopLevelArtifactContext()));
+              BuiltTarget target =
+                  builtTarget(requested, node, driver.getTopLevelArtifactContext(), graph);
+              if (target != null) {
+                targets.add(target);
               }
             }
             default -> {}
@@ -772,12 +779,24 @@ public final class FrontierSerializer {
       List<BuiltTarget> inPackage = entry.getValue();
       // In an order that does not depend on the order of the graph.
       inPackage.sort(Comparator.comparing(target -> target.requested().toString()));
-      var requested = ImmutableList.<ActionLookupKey>builderWithExpectedSize(inPackage.size());
-      var builtWith = ImmutableList.<ActionLookupKey>builderWithExpectedSize(inPackage.size());
+      var names = ImmutableList.<String>builderWithExpectedSize(inPackage.size());
+      var configurations = new LinkedHashMap<Object, Integer>();
+      var requested = ImmutableList.<Integer>builderWithExpectedSize(inPackage.size());
+      var builtWith = ImmutableList.<Integer>builderWithExpectedSize(inPackage.size());
+      var appliesTransition = ImmutableList.<Boolean>builderWithExpectedSize(inPackage.size());
+      var served = ImmutableList.<Object>builderWithExpectedSize(inPackage.size());
       var dependsOn = ImmutableList.<SkyKey>builder();
       for (BuiltTarget target : inPackage) {
-        requested.add(target.requested());
-        builtWith.add(target.builtWith());
+        names.add(target.requested().getLabel().getName());
+        requested.add(
+            configurations.computeIfAbsent(
+                target.requested().getConfigurationKey(), unused -> configurations.size()));
+        builtWith.add(
+            configurations.computeIfAbsent(
+                target.builtWith().getConfigurationKey(), unused -> configurations.size()));
+        appliesTransition.add(target.builtWith().shouldApplyRuleTransition());
+        served.add(target.served() == null ? (Object) Boolean.FALSE : target.served());
+        // The results of a target's tests have the file dependencies the target has.
         dependsOn.add(target.builtWith());
         Optional<TopLevelAspectsKey> aspectsKey = aspects.get(target.requested());
         if (aspectsKey != null) {
@@ -787,18 +806,30 @@ public final class FrontierSerializer {
       packages.add(
           new BuiltPackage(
               entry.getKey(),
-              CompletedPackageValue.of(requested.build(), builtWith.build()),
+              CompletedPackageValue.of(
+                  names.build(),
+                  ImmutableList.copyOf(configurations.keySet()),
+                  requested.build(),
+                  builtWith.build(),
+                  appliesTransition.build(),
+                  served.build()),
               dependsOn.build()));
     }
     return packages.build();
   }
 
   /**
-   * The key a top-level target was built with, if {@code node} drove the build of a rule's target
-   * that was not tested and that a reader can stand in for: see {@link CompletedTopLevelValue}.
+   * What a package's record says of the target {@code node} drove the build of, or null if the
+   * record cannot answer for it: it is not a rule's target a reader can stand in for (see {@link
+   * CompletedTopLevelValue}), its keys are not of the kind the record spells (see {@link
+   * CompletedPackageValue}), or it was tested and a result is not one a reader can take.
    */
   @Nullable
-  private static ConfiguredTargetKey builtAndNotTested(InMemoryNodeEntry node) {
+  private static BuiltTarget builtTarget(
+      ConfiguredTargetKey requested,
+      InMemoryNodeEntry node,
+      TopLevelArtifactContext context,
+      InMemoryGraph graph) {
     if (!(node.getValue() instanceof BuildDriverValue driven)
         || !(driven.getWrappedSkyValue() instanceof ConfiguredTargetValue value)) {
       return null;
@@ -810,14 +841,60 @@ public final class FrontierSerializer {
         || !target.getLabel().equals(target.getOriginalLabel())) {
       return null;
     }
+    TargetCompletionKey completion = null;
     for (SkyKey dep : node.getDirectDeps()) {
-      if (dep instanceof TargetCompletionKey completion) {
-        return completion.willTest()
-            ? null
-            : ConfiguredTargetKey.fromConfiguredTarget(target);
+      if (dep instanceof TargetCompletionKey found) {
+        completion = found;
+        break;
       }
     }
-    return null;
+    if (completion == null) {
+      return null;
+    }
+    ConfiguredTargetKey builtWith = ConfiguredTargetKey.fromConfiguredTarget(target);
+    if (requested.getConfigurationKey() == null
+        || requested.getExecutionPlatformLabel() != null
+        || !requested.shouldApplyRuleTransition()
+        || builtWith.getConfigurationKey() == null
+        || builtWith.getExecutionPlatformLabel() != null
+        || !builtWith.getLabel().equals(requested.getLabel())) {
+      return null;
+    }
+    if (!completion.willTest()) {
+      return new BuiltTarget(requested, builtWith, context, /* served= */ null);
+    }
+    ServedTest served = servedTest(graph, target, builtWith);
+    return served == null ? null : new BuiltTarget(requested, builtWith, context, served);
+  }
+
+  /**
+   * What a reader needs to report the tests of {@code target} without fetching it, or null if it
+   * has to fetch it: see {@link ServedTest}.
+   *
+   * @param builtWith the key of the target's node
+   */
+  @Nullable
+  static ServedTest servedTest(
+      InMemoryGraph graph, ConfiguredTarget target, ActionLookupKey builtWith) {
+    if (!ExecutionValueCaching.testResultsEnabled()) {
+      return null;
+    }
+    InMemoryNodeEntry node = graph.getIfPresent(builtWith);
+    if (node == null || !node.isDone() || !(node.getValue() instanceof ActionLookupValue actions)) {
+      return null;
+    }
+    return ServedTest.of(
+        target,
+        actions,
+        action -> {
+          InMemoryNodeEntry result = graph.getIfPresent(action);
+          return result != null
+                  && result.isDone()
+                  && result.getValue() instanceof ActionExecutionValue value
+                  && ExecutionValuesForReaders.isTestResult(value)
+              ? ExecutionValuesForReaders.forReader(value)
+              : null;
+        });
   }
 
   /** The mnemonic of the action {@code data} is the result of, for a message. */

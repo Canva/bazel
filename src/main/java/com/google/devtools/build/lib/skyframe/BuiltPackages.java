@@ -20,12 +20,14 @@ import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.MoreExecutors;
 import com.google.devtools.build.lib.actions.ActionLookupKey;
 import com.google.devtools.build.lib.analysis.TopLevelArtifactContext;
+import com.google.devtools.build.lib.analysis.test.ServedTest;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.cmdline.PackageIdentifier;
 import com.google.devtools.build.lib.profiler.Profiler;
 import com.google.devtools.build.lib.profiler.SilentCloseable;
 import com.google.devtools.build.lib.skyframe.AspectKeyCreator.TopLevelAspectsKey;
 import com.google.devtools.build.lib.skyframe.SkyValueRetrieverUtils.CompletedProbe;
+import com.google.devtools.build.lib.skyframe.config.BuildConfigurationKey;
 import com.google.devtools.build.lib.skyframe.serialization.SkyValueRetriever.RetrievalResult;
 import com.google.devtools.build.lib.skyframe.serialization.SkyValueRetriever.RetrievedValue;
 import com.google.devtools.build.lib.skyframe.serialization.analysis.CompletedPackageKey;
@@ -84,7 +86,11 @@ public final class BuiltPackages {
     var byPackage = new HashMap<PackageIdentifier, List<ConfiguredTargetKey>>();
     for (ConfiguredTargetKey target : targets) {
       Label label = target.getLabel();
-      if (label == null || willTest.test(label)) {
+      // A record spells the key a target is asked for with as a top-level target's key is.
+      if (label == null
+          || target.getConfigurationKey() == null
+          || target.getExecutionPlatformLabel() != null
+          || !target.shouldApplyRuleTransition()) {
         continue;
       }
       byPackage.computeIfAbsent(label.getPackageIdentifier(), unused -> new ArrayList<>())
@@ -112,6 +118,7 @@ public final class BuiltPackages {
     SilentCloseable applying = Profiler.instance().profile("BuiltPackages.ask: apply");
 
     int valid = 0;
+    int tests = 0;
     ImmutableSet.Builder<ConfiguredTargetKey> answered = ImmutableSet.builder();
     for (int i = 0; i < lookups.size(); i++) {
       RetrievalResult result;
@@ -125,30 +132,60 @@ public final class BuiltPackages {
         continue;
       }
       valid++;
-      var builtWith = new HashMap<ActionLookupKey, ActionLookupKey>();
-      for (int j = 0; j < built.requested().size(); j++) {
-        builtWith.put(built.requested().get(j), built.builtWith().get(j));
+      var indexOf = new HashMap<String, Integer>();
+      for (int j = 0; j < built.names().size(); j++) {
+        indexOf.put(built.names().get(j), j);
       }
       for (ConfiguredTargetKey target : packages.get(i)) {
-        ActionLookupKey key = builtWith.get(target);
-        if (key == null) {
+        Integer index = indexOf.get(target.getLabel().getName());
+        if (index == null
+            || !target
+                .getConfigurationKey()
+                .equals(built.configurations().get(built.requestedConfiguration().get(index)))
+            || !(built.configurations().get(built.builtConfiguration().get(index))
+                instanceof BuildConfigurationKey builtConfiguration)) {
+          continue;
+        }
+        // A target that was built to be tested was built without the runfiles tree a target
+        // that is only built has, and one that was only built has no results: the record
+        // answers for what the writer did with the target, and for nothing else.
+        boolean tested = built.servedTests().get(index) instanceof ServedTest;
+        if (tested != willTest.test(target.getLabel())) {
+          continue;
+        }
+        ConfiguredTargetKey key =
+            ConfiguredTargetKey.builder()
+                .setLabel(target.getLabel())
+                .setConfigurationKey(builtConfiguration)
+                .setShouldApplyRuleTransition(built.builtAppliesRuleTransition().get(index))
+                .build();
+        TopLevelAspectsKey aspectsKey = aspectsOf.get(target);
+        if (aspectsKey != null) {
+          admission.shareProbe(
+              CompletedTopLevelKey.of(aspectsKey, context, /* willTest= */ false),
+              found(CompletedTopLevelValue.INSTANCE));
+        }
+        if (tested) {
+          // The aspects of a target that is going to be tested are named, because a test
+          // counts as built only if its validation aspect is among those that succeeded: so
+          // the node that names them is evaluated, and finds the answer above.
+          tests++;
+          admission.shareProbe(
+              CompletedTopLevelKey.of(target, context, /* willTest= */ true),
+              found(CompletedTopLevelValue.tested(key, built.servedTests().get(index))));
           continue;
         }
         answered.add(target);
         admission.shareProbe(
             CompletedTopLevelKey.of(target, context, /* willTest= */ false),
             found(CompletedTopLevelValue.builtWith(key)));
-        TopLevelAspectsKey aspectsKey = aspectsOf.get(target);
         if (aspectsKey != null) {
-          admission.shareProbe(
-              CompletedTopLevelKey.of(aspectsKey, context, /* willTest= */ false),
-              found(CompletedTopLevelValue.INSTANCE));
           admission.noteAspectsOfATargetBuilt(aspectsKey);
         }
       }
     }
     ImmutableSet<ConfiguredTargetKey> built = answered.build();
-    admission.noteBuiltByPackage(lookups.size(), valid, built.size());
+    admission.noteBuiltByPackage(lookups.size(), valid, built.size() + tests);
     applying.close();
     return built;
   }

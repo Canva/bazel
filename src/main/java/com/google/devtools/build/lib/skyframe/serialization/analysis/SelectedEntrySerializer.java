@@ -544,26 +544,10 @@ final class SelectedEntrySerializer {
     // A target that was tested: a reader reports its tests from their results, which it needs
     // the target for. If every result is one a reader can take, the record carries them and
     // what the target says about its tests, and the reader does not fetch the target.
-    if (!ExecutionValueCaching.testResultsEnabled()
-        || !(node.getValue() instanceof ActionLookupValue actions)) {
-      return CompletedTopLevelValue.INSTANCE;
-    }
-    ServedTest served = ServedTest.of(target, actions, this::testResultForReader);
+    ServedTest served = FrontierSerializer.servedTest(graph, target, builtWith);
     return served == null
         ? CompletedTopLevelValue.INSTANCE
         : CompletedTopLevelValue.tested(builtWith, served);
-  }
-
-  /** The result of a test action as it is uploaded for readers, or null if it is not. */
-  @Nullable
-  private ActionExecutionValue testResultForReader(ActionLookupData action) {
-    InMemoryNodeEntry node = graph.getIfPresent(action);
-    return node != null
-            && node.isDone()
-            && node.getValue() instanceof ActionExecutionValue value
-            && ExecutionValuesForReaders.isTestResult(value)
-        ? ExecutionValuesForReaders.forReader(value)
-        : null;
   }
 
   /**
