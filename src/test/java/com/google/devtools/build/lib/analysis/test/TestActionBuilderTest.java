@@ -204,6 +204,31 @@ public class TestActionBuilderTest extends BuildViewTestCase {
   }
 
   @Test
+  public void withoutInputs_reportsAsTheActionDoesAndHasNothingToRunWith() throws Exception {
+    Artifact status = Iterables.getOnlyElement(getTestStatusArtifacts("//tests:small_test_1"));
+    TestRunnerAction action = (TestRunnerAction) getGeneratingAction(status);
+
+    TestRunnerAction slim = action.withoutInputs();
+
+    assertThat(action.getInputs().toList()).isNotEmpty();
+    assertThat(slim.getInputs().toList()).isEmpty();
+    assertThat(slim.getExecutionSettings().getRunfiles().getAllArtifacts().toList()).isEmpty();
+    assertThat(slim.getOwner()).isSameInstanceAs(action.getOwner());
+    assertThat(slim.getOutputs()).isEqualTo(action.getOutputs());
+    assertThat(slim.getTestLog()).isEqualTo(action.getTestLog());
+    assertThat(slim.getCacheStatusArtifact()).isEqualTo(action.getCacheStatusArtifact());
+    assertThat(slim.getShardNum()).isEqualTo(action.getShardNum());
+    assertThat(slim.getRunNumber()).isEqualTo(action.getRunNumber());
+    assertThat(slim.getTestName()).isEqualTo(action.getTestName());
+    assertThat(slim.getTestProperties()).isSameInstanceAs(action.getTestProperties());
+    assertThat(slim.getExecutionSettings().getTotalShards())
+        .isEqualTo(action.getExecutionSettings().getTotalShards());
+    assertThat(slim.getExecutionSettings().getTotalRuns())
+        .isEqualTo(action.getExecutionSettings().getTotalRuns());
+    assertThat(slim.shouldAcceptCachedResult()).isEqualTo(action.shouldAcceptCachedResult());
+  }
+
+  @Test
   public void testSharding() throws Exception {
     useConfiguration("--test_sharding_strategy=explicit");
 
