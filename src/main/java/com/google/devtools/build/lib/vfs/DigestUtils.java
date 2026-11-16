@@ -40,6 +40,19 @@ public class DigestUtils {
 
   private static final HexFormat HEX_FORMAT = HexFormat.of();
 
+  // The two lowercase hex digits of every byte value. A single lookup per input byte is
+  // considerably cheaper than HexFormat's per-digit methods, which matters as digests are encoded
+  // for every input of every remotely cached or executed spawn. The first digit is in the low byte
+  // so that the JIT can merge the stores of the two digits into a single little-endian store.
+  private static final short[] HEX_DIGIT_PAIRS = new short[256];
+
+  static {
+    for (int i = 0; i < HEX_DIGIT_PAIRS.length; i++) {
+      HEX_DIGIT_PAIRS[i] =
+          (short) (HEX_FORMAT.toLowHexDigit(i) << 8 | HEX_FORMAT.toHighHexDigit(i));
+    }
+  }
+
   /**
    * The digest of a file together with the metadata of the file it was computed from, for files
    * where we don't have fast digests.
@@ -215,8 +228,9 @@ public class DigestUtils {
   public static ByteString toHexByteString(byte[] bytes) {
     byte[] hex = new byte[2 * bytes.length];
     for (int i = 0; i < bytes.length; i++) {
-      hex[2 * i] = (byte) HEX_FORMAT.toHighHexDigit(bytes[i]);
-      hex[2 * i + 1] = (byte) HEX_FORMAT.toLowHexDigit(bytes[i]);
+      short pair = HEX_DIGIT_PAIRS[bytes[i] & 0xff];
+      hex[2 * i] = (byte) pair;
+      hex[2 * i + 1] = (byte) (pair >> 8);
     }
     return UnsafeByteOperations.unsafeWrap(hex);
   }
