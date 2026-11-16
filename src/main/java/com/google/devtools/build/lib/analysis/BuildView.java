@@ -379,23 +379,29 @@ public class BuildView {
     }
 
     var configurationKey = topLevelConfig.getKey();
-    ImmutableList<ConfiguredTargetKey> topLevelCtKeys =
-        labelToTargetMap.keySet().stream()
-            .map(
-                label ->
-                    ConfiguredTargetKey.builder()
-                        .setLabel(label)
-                        .setConfigurationKey(configurationKey)
-                        .build())
-            .collect(toImmutableList());
+    ImmutableList<ConfiguredTargetKey> topLevelCtKeys;
+    ImmutableList<TopLevelAspectsKey> aspectKeys;
+    try (SilentCloseable c = Profiler.instance().profile("createTopLevelKeys")) {
+      topLevelCtKeys =
+          labelToTargetMap.keySet().stream()
+              .map(
+                  label ->
+                      ConfiguredTargetKey.builder()
+                          .setLabel(label)
+                          .setConfigurationKey(configurationKey)
+                          .build())
+              .collect(toImmutableList());
 
-    ImmutableList<TopLevelAspectsKey> aspectKeys =
-        createTopLevelAspectKeys(
-            aspects, aspectsParameters, labelToTargetMap, topLevelConfig, eventHandler);
+      aspectKeys =
+          createTopLevelAspectKeys(
+              aspects, aspectsParameters, labelToTargetMap, topLevelConfig, eventHandler);
+    }
 
     skyframeExecutor.setRemoteAnalysisCachingDependenciesProvider(
         remoteAnalysisCachingDependenciesProvider, remoteAnalysisCacheReaderDeps);
-    skyframeExecutor.invalidateWithExternalService(eventHandler);
+    try (SilentCloseable c = Profiler.instance().profile("invalidateWithExternalService")) {
+      skyframeExecutor.invalidateWithExternalService(eventHandler);
+    }
 
     getArtifactFactory().noteAnalysisStarting();
     SkyframeAnalysisResult skyframeAnalysisResult;

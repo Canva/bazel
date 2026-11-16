@@ -22,6 +22,8 @@ import com.google.devtools.build.lib.actions.ActionLookupKey;
 import com.google.devtools.build.lib.analysis.TopLevelArtifactContext;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.cmdline.PackageIdentifier;
+import com.google.devtools.build.lib.profiler.Profiler;
+import com.google.devtools.build.lib.profiler.SilentCloseable;
 import com.google.devtools.build.lib.skyframe.AspectKeyCreator.TopLevelAspectsKey;
 import com.google.devtools.build.lib.skyframe.SkyValueRetrieverUtils.CompletedProbe;
 import com.google.devtools.build.lib.skyframe.serialization.SkyValueRetriever.RetrievalResult;
@@ -92,6 +94,7 @@ public final class BuiltPackages {
       return ImmutableSet.of();
     }
 
+    SilentCloseable issuing = Profiler.instance().profile("BuiltPackages.ask: issue");
     var packages = new ArrayList<List<ConfiguredTargetKey>>(byPackage.size());
     var lookups = new ArrayList<ListenableFuture<RetrievalResult>>(byPackage.size());
     for (Map.Entry<PackageIdentifier, List<ConfiguredTargetKey>> entry : byPackage.entrySet()) {
@@ -100,11 +103,13 @@ public final class BuiltPackages {
           SkyValueRetrieverUtils.retrieveDetached(
               CompletedPackageKey.of(entry.getKey(), context, aspectsName), cachingDeps));
     }
-    try {
+    issuing.close();
+    try (SilentCloseable c = Profiler.instance().profile("BuiltPackages.ask: wait")) {
       Futures.whenAllComplete(lookups).call(() -> null, MoreExecutors.directExecutor()).get();
     } catch (ExecutionException e) {
       throw new IllegalStateException(e);
     }
+    SilentCloseable applying = Profiler.instance().profile("BuiltPackages.ask: apply");
 
     int valid = 0;
     ImmutableSet.Builder<ConfiguredTargetKey> answered = ImmutableSet.builder();
@@ -144,6 +149,7 @@ public final class BuiltPackages {
     }
     ImmutableSet<ConfiguredTargetKey> built = answered.build();
     admission.noteBuiltByPackage(lookups.size(), valid, built.size());
+    applying.close();
     return built;
   }
 

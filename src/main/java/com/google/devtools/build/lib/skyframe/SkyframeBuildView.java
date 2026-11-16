@@ -667,16 +667,24 @@ public final class SkyframeBuildView {
 
     // A reader of the analysis cache that reports what was built without fetching it asks about
     // whole packages first.
-    ImmutableSet<ConfiguredTargetKey> builtWithTheirAspects =
-        BuiltPackages.ask(
-        ctKeys,
-        topLevelAspectsKeys,
-        topLevelArtifactContext,
-        label ->
-            determineTestTypeImpl(
-                    testsToRun, labelTargetMap, label, buildDriverKeyTestContext, eventHandler)
-                != TestType.NOT_TEST,
-        skyframeExecutor.getRemoteAnalysisCacheReaderDepsProvider());
+    ImmutableSet<ConfiguredTargetKey> builtWithTheirAspects;
+    try (SilentCloseable c = Profiler.instance().profile("BuiltPackages.ask")) {
+      builtWithTheirAspects =
+          BuiltPackages.ask(
+              ctKeys,
+              topLevelAspectsKeys,
+              topLevelArtifactContext,
+              label ->
+                  determineTestTypeImpl(
+                          testsToRun,
+                          labelTargetMap,
+                          label,
+                          buildDriverKeyTestContext,
+                          eventHandler)
+                      != TestType.NOT_TEST,
+              skyframeExecutor.getRemoteAnalysisCacheReaderDepsProvider());
+    }
+    SilentCloseable creatingDriverKeys = Profiler.instance().profile("createBuildDriverKeys");
 
     ImmutableSet<BuildDriverKey> buildDriverCTKeys =
         ctKeys.stream()
@@ -706,6 +714,7 @@ public final class SkyframeBuildView {
                         extraActionTopLevelOnly,
                         keepGoing))
             .collect(ImmutableSet.toImmutableSet());
+    creatingDriverKeys.close();
     List<DetailedExitCode> detailedExitCodes = new ArrayList<>();
     MultiThreadPoolsQuiescingExecutor executor =
         (MultiThreadPoolsQuiescingExecutor) executors.getMergedAnalysisAndExecutionExecutor();
