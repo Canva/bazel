@@ -107,6 +107,46 @@ public class AnsiTerminalPrinterTest {
   }
 
   @Test
+  public void testPrepared_printsWhatPrintingDoes() throws Exception {
+    String first = "1" + Mode.INFO + "2" + Mode.DEFAULT + "3\n";
+    String second = Mode.ERROR + "4" + Mode.DEFAULT + "5\n";
+    printer.print(first);
+    printer.print(second);
+    String printed = stream.toString();
+
+    stream.reset();
+    ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+    AnsiTerminalPrinter preparing = printer.preparingInto(buffer);
+    preparing.print(first);
+    preparing.print(second);
+    assertString("");
+    printer.printPrepared(buffer);
+    assertString(printed);
+  }
+
+  @Test
+  public void testPrepared_startsFromTheDefaultMode() throws Exception {
+    ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+    printer.preparingInto(buffer).print("_B_");
+    printer.print("_A_" + Mode.INFO);
+    printer.printPrepared(buffer);
+    // The sequence that resets the terminal comes between the two.
+    assertRegex("^_A_.+_B_$");
+    stream.reset();
+    printer.print("_C_");
+    assertString("_C_");
+  }
+
+  @Test
+  public void testPrepared_plainPrinterPreparesPlainText() throws Exception {
+    setPlainPrinter();
+    ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+    printer.preparingInto(buffer).print("1" + Mode.INFO + "2" + Mode.DEFAULT + "3");
+    printer.printPrepared(buffer);
+    assertString("123");
+  }
+
+  @Test
   public void testPrintHyperlink() {
     String link = AnsiTerminal.hyperlink("file:///tmp/test.log", "test.log");
     printer.print(link);

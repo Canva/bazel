@@ -52,6 +52,8 @@ import com.google.protobuf.util.Timestamps;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Locale;
+import java.util.concurrent.TimeUnit;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -717,5 +719,24 @@ public class TestSummaryTest {
         .addTestTimes(SMALL_TIMING)
         .build();
     return summary;
+  }
+
+  @Test
+  public void timeInSec_printsTenthsOfASecondRoundedHalfUp() {
+    for (long ms : new long[] {0, 1, 49, 50, 51, 99, 100, 149, 150, 950, 999, 1000, 1049, 1050}) {
+      assertThat(TestSummaryPrinter.timeInSec(ms, TimeUnit.MILLISECONDS))
+          .isEqualTo(String.format(Locale.US, "%.1fs", ms / 1000.0));
+    }
+    for (long ms = 0; ms < 200_000; ms += 7) {
+      assertThat(TestSummaryPrinter.timeInSec(ms, TimeUnit.MILLISECONDS))
+          .isEqualTo(String.format(Locale.US, "%.1fs", ms / 1000.0));
+    }
+    assertThat(TestSummaryPrinter.timeInSec(0, TimeUnit.MILLISECONDS)).isEqualTo("0.0s");
+    assertThat(TestSummaryPrinter.timeInSec(150, TimeUnit.MILLISECONDS)).isEqualTo("0.2s");
+    assertThat(TestSummaryPrinter.timeInSec(32_149, TimeUnit.MILLISECONDS)).isEqualTo("32.1s");
+    assertThat(TestSummaryPrinter.timeInSec(90, TimeUnit.SECONDS)).isEqualTo("90.0s");
+    assertThat(TestSummaryPrinter.timeInSec(-1500, TimeUnit.MILLISECONDS)).isEqualTo("-1.5s");
+    assertThat(TestSummaryPrinter.timeInSec(Long.MAX_VALUE, TimeUnit.MILLISECONDS))
+        .isEqualTo(String.format(Locale.US, "%.1fs", Long.MAX_VALUE / 1000.0));
   }
 }

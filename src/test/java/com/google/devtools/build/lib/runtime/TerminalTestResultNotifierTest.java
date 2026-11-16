@@ -15,6 +15,7 @@
 package com.google.devtools.build.lib.runtime;
 
 import static com.google.common.truth.Truth.assertThat;
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
@@ -39,11 +40,13 @@ import com.google.devtools.build.lib.util.io.AnsiTerminal;
 import com.google.devtools.build.lib.util.io.AnsiTerminalPrinter;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.view.test.TestStatus.BlazeTestStatus;
+import com.google.devtools.build.lib.view.test.TestStatus.FailedTestCasesStatus;
 import com.google.devtools.build.lib.view.test.TestStatus.TestCase;
 import com.google.devtools.build.lib.view.test.TestStatus.TestCase.Status;
 import com.google.devtools.common.options.Options;
 import com.google.devtools.common.options.OptionsParsingResult;
 import com.google.devtools.common.options.TriState;
+import java.io.ByteArrayOutputStream;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
@@ -653,6 +656,76 @@ public final class TerminalTestResultNotifierTest {
 
   private static String error(String message) {
     return AnsiTerminalPrinter.Mode.ERROR + message + AnsiTerminalPrinter.Mode.DEFAULT;
+  }
+
+  @Test
+  public void detailedOption_manyTests_printsWhatPrintingEachInTurnDoes() throws Exception {
+    ExecutionOptions executionOptions = Options.getDefaults(ExecutionOptions.class);
+    executionOptions.setTestSummary(TestSummaryFormat.DETAILED);
+    when(optionsParsingResult.getOptions(ExecutionOptions.class)).thenReturn(executionOptions);
+    TestSummaryOptions testSummaryOptions = Options.getDefaults(TestSummaryOptions.class);
+    testSummaryOptions.setVerboseSummary(true);
+    when(optionsParsingResult.getOptions(TestSummaryOptions.class)).thenReturn(testSummaryOptions);
+
+    // Enough of them to be put into words by several threads, several times over.
+    ImmutableList.Builder<TestSummary> builder = ImmutableList.builder();
+    for (int i = 0; i < 20_000; i++) {
+      boolean passes = i % 7 != 3;
+      TestSummary summary = mock(TestSummary.class);
+      when(summary.getStatus())
+          .thenReturn(passes ? BlazeTestStatus.PASSED : BlazeTestStatus.FAILED);
+      when(summary.getStatusMode())
+          .thenReturn(passes ? AnsiTerminalPrinter.Mode.INFO : AnsiTerminalPrinter.Mode.ERROR);
+      when(summary.getLabel()).thenReturn(Label.parseCanonical("//foo:test" + i));
+      when(summary.actionRan()).thenReturn(true);
+      when(summary.getTotalTestCases()).thenReturn(2);
+      when(summary.getPassedTestCases())
+          .thenReturn(
+              ImmutableList.of(
+                  TestCase.newBuilder()
+                      .setName("passes" + i)
+                      .setClassName("Cases")
+                      .setStatus(Status.PASSED)
+                      .setRunDurationMillis(i)
+                      .build()));
+      when(summary.getFailedTestCases())
+          .thenReturn(
+              passes
+                  ? ImmutableList.of()
+                  : ImmutableList.of(
+                      TestCase.newBuilder()
+                          .setName("fails" + i)
+                          .setClassName("Cases")
+                          .setStatus(Status.FAILED)
+                          .build()));
+      when(summary.getFailedTestCasesStatus()).thenReturn(FailedTestCasesStatus.FULL);
+      builder.add(summary);
+    }
+    ImmutableList<TestSummary> summaries = builder.build();
+
+    ByteArrayOutputStream printed = new ByteArrayOutputStream();
+    new TerminalTestResultNotifier(
+            new AnsiTerminalPrinter(printed, /* useColor= */ true),
+            Path::getPathString,
+            optionsParsingResult,
+            RepositoryMapping.EMPTY)
+        .notify(ImmutableSet.copyOf(summaries), summaries.size());
+
+    ByteArrayOutputStream eachInTurn = new ByteArrayOutputStream();
+    AnsiTerminalPrinter printer = new AnsiTerminalPrinter(eachInTurn, /* useColor= */ true);
+    for (TestSummary summary : summaries) {
+      TestSummaryPrinter.print(
+          summary,
+          printer,
+          Path::getPathString,
+          /* verboseSummary= */ true,
+          /* showAllTestCases= */ true,
+          /* withConfigurationName= */ false,
+          RepositoryMapping.EMPTY);
+    }
+    assertThat(eachInTurn.size()).isGreaterThan(20_000 * 80);
+    // The statistics follow the summaries.
+    assertThat(printed.toString(UTF_8)).startsWith(eachInTurn.toString(UTF_8));
   }
 
   @Test

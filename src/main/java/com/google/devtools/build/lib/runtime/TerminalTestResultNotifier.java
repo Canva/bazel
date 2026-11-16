@@ -13,6 +13,7 @@
 // limitations under the License.
 package com.google.devtools.build.lib.runtime;
 
+import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.devtools.build.lib.exec.ExecutionOptions.TestSummaryFormat.DETAILED;
 import static com.google.devtools.build.lib.exec.ExecutionOptions.TestSummaryFormat.DETAILED_UNCACHED;
 import static com.google.devtools.build.lib.exec.ExecutionOptions.TestSummaryFormat.SHORT;
@@ -22,6 +23,7 @@ import static com.google.devtools.build.lib.exec.ExecutionOptions.TestSummaryFor
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
 import com.google.devtools.build.lib.analysis.test.TestResult;
 import com.google.devtools.build.lib.cmdline.Label;
@@ -35,6 +37,7 @@ import com.google.devtools.build.lib.util.StringUtil;
 import com.google.devtools.build.lib.util.io.AnsiTerminalPrinter;
 import com.google.devtools.build.lib.view.test.TestStatus.BlazeTestStatus;
 import com.google.devtools.common.options.OptionsParsingResult;
+import java.io.ByteArrayOutputStream;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -117,6 +120,7 @@ public class TerminalTestResultNotifier implements TestResultNotifier {
       boolean showCachedTests) {
     boolean withConfig = duplicateLabels(summaries);
     int numFailedToBuildReported = 0;
+    List<TestSummary> toPrint = new ArrayList<>();
     for (TestSummary summary : summaries) {
       if (!showAllTests
           && (BlazeTestStatus.PASSED == summary.getStatus()
@@ -125,6 +129,8 @@ public class TerminalTestResultNotifier implements TestResultNotifier {
       }
       if (BlazeTestStatus.FAILED_TO_BUILD == summary.getStatus()) {
         if (numFailedToBuildReported == NUM_FAILED_TO_BUILD) {
+          printSummaries(toPrint, showAllTestCases, withConfig);
+          toPrint.clear();
           printer.printLn("(Skipping other failed to build tests)");
         }
         numFailedToBuildReported++;
@@ -139,15 +145,66 @@ public class TerminalTestResultNotifier implements TestResultNotifier {
         continue;
       }
 
-      TestSummaryPrinter.print(
-          summary,
-          printer,
-          testLogPathFormatter,
-          summaryOptions.getVerboseSummary(),
-          showAllTestCases,
-          withConfig,
-          mainRepoMapping);
+      toPrint.add(summary);
     }
+    printSummaries(toPrint, showAllTestCases, withConfig);
+  }
+
+  /** As many summaries as are put into words by one thread before the next takes over. */
+  private static final int SUMMARIES_PREPARED_TOGETHER = 64;
+
+  /** As many of those groups as are put into words before any of them is printed. */
+  private static final int GROUPS_PREPARED_AHEAD = 256;
+
+  /**
+   * Prints the given summaries in their order.
+   *
+   * <p>Those of a build with many tests are put into words on several threads, a few thousand at
+   * a time, and then printed: a summary with its test cases is a page of text, the summaries of
+   * 35,000 tests are a quarter of a gigabyte of it, and the one thread of the command took four
+   * seconds to format that while every other was idle.
+   */
+  private void printSummaries(
+      List<TestSummary> summaries, boolean showAllTestCases, boolean withConfig) {
+    if (summaries.size() < 2 * SUMMARIES_PREPARED_TOGETHER) {
+      for (TestSummary summary : summaries) {
+        printOne(summary, printer, showAllTestCases, withConfig);
+      }
+      return;
+    }
+    List<List<TestSummary>> groups = Lists.partition(summaries, SUMMARIES_PREPARED_TOGETHER);
+    for (List<List<TestSummary>> ahead : Lists.partition(groups, GROUPS_PREPARED_AHEAD)) {
+      List<ByteArrayOutputStream> prepared =
+          ahead.parallelStream()
+              .map(
+                  group -> {
+                    ByteArrayOutputStream buffer = new ByteArrayOutputStream(1 << 16);
+                    AnsiTerminalPrinter preparing = printer.preparingInto(buffer);
+                    for (TestSummary summary : group) {
+                      printOne(summary, preparing, showAllTestCases, withConfig);
+                    }
+                    return buffer;
+                  })
+              .collect(toImmutableList());
+      for (ByteArrayOutputStream buffer : prepared) {
+        printer.printPrepared(buffer);
+      }
+    }
+  }
+
+  private void printOne(
+      TestSummary summary,
+      AnsiTerminalPrinter terminalPrinter,
+      boolean showAllTestCases,
+      boolean withConfig) {
+    TestSummaryPrinter.print(
+        summary,
+        terminalPrinter,
+        testLogPathFormatter,
+        summaryOptions.getVerboseSummary(),
+        showAllTestCases,
+        withConfig,
+        mainRepoMapping);
   }
 
   /**

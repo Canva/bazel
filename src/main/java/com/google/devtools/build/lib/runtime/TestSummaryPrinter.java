@@ -263,9 +263,23 @@ public class TestSummaryPrinter {
    * i.e. "32.1s".
    */
   static String timeInSec(long time, TimeUnit unit) {
-    double ms = TimeUnit.MILLISECONDS.convert(time, unit);
-    return String.format(Locale.US, "%.1fs", ms / 1000.0);
+    long ms = TimeUnit.MILLISECONDS.convert(time, unit);
+    if (ms < 0 || ms >= EXACT_TENTHS_BELOW_MS) {
+      return String.format(Locale.US, "%.1fs", ms / 1000.0);
+    }
+    // What the format above prints, which rounds half up, without parsing a format string and
+    // going through a double for it: a summary with every test case prints a million of these.
+    long tenths = (ms + 50) / 100;
+    return new StringBuilder(8)
+        .append(tenths / 10)
+        .append('.')
+        .append(tenths % 10)
+        .append('s')
+        .toString();
   }
+
+  /** A number of milliseconds below which a double holds every number of them exactly. */
+  private static final long EXACT_TENTHS_BELOW_MS = 1L << 50;
 
   static String getAttemptSummary(TestSummary summary) {
     int attempts = summary.getPassedLogs().size() + summary.getFailedLogs().size();
