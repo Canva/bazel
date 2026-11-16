@@ -168,12 +168,23 @@ public final class TargetParsingCompleteEvent implements BuildEventWithOrderCons
       childrenBuilder.add(
           BuildEventIdUtil.targetPatternExpanded(ImmutableList.of(failedTargetPattern)));
     }
-    for (ThinTarget target : expandedTargets) {
-      // Test suites won't produce target configuration and target-complete events, so do not
-      // announce here completion as children.
-      if (!target.isTestSuiteRule()) {
-        childrenBuilder.add(BuildEventIdUtil.targetConfigured(target.getLabel()));
+    // Test suites won't produce target configuration and target-complete events, so do not
+    // announce here completion as children.
+    if (expandedTargets.size() < MANY_TARGETS) {
+      for (ThinTarget target : expandedTargets) {
+        if (!target.isTestSuiteRule()) {
+          childrenBuilder.add(BuildEventIdUtil.targetConfigured(target.getLabel()));
+        }
       }
+    } else {
+      // An id is a message built around the target's label as an interned string. The ids of the
+      // half a million targets of a large build took one thread most of a second, at a point of
+      // the build where no other has anything to do.
+      childrenBuilder.addAll(
+          expandedTargets.parallelStream()
+              .filter(target -> !target.isTestSuiteRule())
+              .map(target -> BuildEventIdUtil.targetConfigured(target.getLabel()))
+              .collect(ImmutableList.toImmutableList()));
     }
     return childrenBuilder.build();
   }
@@ -196,7 +207,13 @@ public final class TargetParsingCompleteEvent implements BuildEventWithOrderCons
     return true;
   }
 
+  /** A number of targets from which what is derived from each is derived on several threads. */
+  private static final int MANY_TARGETS = 10_000;
+
   private static ImmutableSet<ThinTarget> asThinTargets(Collection<Target> targets) {
-    return targets.stream().map(ThinTarget::new).collect(ImmutableSet.toImmutableSet());
+    // In the order of the collection either way.
+    return (targets.size() < MANY_TARGETS ? targets.stream() : targets.parallelStream())
+        .map(ThinTarget::new)
+        .collect(ImmutableSet.toImmutableSet());
   }
 }

@@ -51,6 +51,7 @@ import com.google.devtools.build.lib.skyframe.TargetPatternPhaseValue.TargetPatt
 import com.google.devtools.build.lib.skyframe.TargetPatternValue.TargetPatternKey;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.devtools.build.skyframe.SkyFunction;
+import com.google.devtools.build.skyframe.SkyFunction.Environment.SkyKeyComputeState;
 import com.google.devtools.build.skyframe.SkyKey;
 import com.google.devtools.build.skyframe.SkyframeLookupResult;
 import java.util.ArrayList;
@@ -80,28 +81,55 @@ final class TargetPatternPhaseFunction implements SkyFunction {
       return null;
     }
 
+    // This function is restarted twice in a build that tests, each time after asking for values it
+    // can only name once it has the targets, and what it works out before it asks is the same each
+    // time: the targets of every pattern, merged and filtered. For the half a million targets of a
+    // large build that is a second of one thread, at a point where no other has anything to do.
+    State state = env.getState(State::new);
+
     // Determine targets to build:
     List<String> failedPatterns = new ArrayList<>();
-    List<ExpandedPattern> expandedPatterns =
-        getTargetsToBuild(env, options, repositoryMappingValue.repositoryMapping(), failedPatterns);
-    ResolvedTargets<Target> targets =
-        env.valuesMissing()
-            ? null
-            : mergeAll(expandedPatterns, !failedPatterns.isEmpty(), env, options);
+    List<ExpandedPattern> expandedPatterns = state.expandedPatterns;
+    ResolvedTargets<Target> targets = state.targets;
+    if (expandedPatterns == null || targets == null) {
+      expandedPatterns =
+          getTargetsToBuild(
+              env, options, repositoryMappingValue.repositoryMapping(), failedPatterns);
+      targets =
+          env.valuesMissing()
+              ? null
+              : mergeAll(expandedPatterns, !failedPatterns.isEmpty(), env, options);
+      // Kept only if every pattern expanded: a pattern that does not is reported to the listener
+      // of this computation, and what is reported before a restart is not reported after it. The
+      // same goes for what --compile_one_dependency reports.
+      if (targets != null
+          && failedPatterns.isEmpty()
+          && !options.getCompileOneDependency()
+          && !env.valuesMissing()) {
+        state.expandedPatterns = expandedPatterns;
+        state.targets = targets;
+      }
+    }
 
     // Record labels before they're expanded. For example, if the build requests a test_suite //foo,
     // record //foo here instead of the tests the suite expands to.
-    ImmutableSet<Label> nonExpandedLabels =
-        targets == null
-            ? ImmutableSet.of()
-            : targets.getTargets().stream().map(Target::getLabel).collect(toImmutableSet());
+    ImmutableSet<Label> nonExpandedLabels = state.nonExpandedLabels;
+    if (nonExpandedLabels == null || state.targets == null) {
+      nonExpandedLabels =
+          targets == null
+              ? ImmutableSet.of()
+              : targets.getTargets().stream().map(Target::getLabel).collect(toImmutableSet());
+      if (state.targets != null) {
+        state.nonExpandedLabels = nonExpandedLabels;
+      }
+    }
 
     // If the --build_tests_only option was specified or we want to run tests, we need to determine
     // the list of targets to test. For that, we remove manual tests and apply the command-line
     // filters. Also, if --build_tests_only is specified, then the list of filtered targets will be
     // set as build list as well.
-    ResolvedTargets<Target> testTargets = null;
-    if (options.getDetermineTests() || options.getBuildTestsOnly()) {
+    ResolvedTargets<Target> testTargets = state.testTargets;
+    if (testTargets == null && (options.getDetermineTests() || options.getBuildTestsOnly())) {
       testTargets =
           determineTests(
               env,
@@ -110,6 +138,8 @@ final class TargetPatternPhaseFunction implements SkyFunction {
               repositoryMappingValue.repositoryMapping(),
               options.getTestFilter());
       Preconditions.checkState(env.valuesMissing() || (testTargets != null));
+      // It reports nothing to the listener.
+      state.testTargets = testTargets;
     }
 
     Map<Label, SkyKey> testExpansionKeys = new LinkedHashMap<>();
@@ -512,6 +542,21 @@ final class TargetPatternPhaseFunction implements SkyFunction {
                     expansion.resolvedTargets().getTargets().stream()
                         .filter(includedTargets::contains)
                         .map(Target::getLabel)));
+  }
+
+  /** What a computation has worked out, for when it is restarted. */
+  private static final class State implements SkyKeyComputeState {
+    /** The expansion of every pattern, if every pattern expanded. */
+    @Nullable private List<ExpandedPattern> expandedPatterns;
+
+    /** Those expansions merged and filtered; set together with them. */
+    @Nullable private ResolvedTargets<Target> targets;
+
+    /** The labels of {@link #targets}. */
+    @Nullable private ImmutableSet<Label> nonExpandedLabels;
+
+    /** The tests among the targets of the patterns, once they have been determined. */
+    @Nullable private ResolvedTargets<Target> testTargets;
   }
 
   /** Represents the expansion of a single target pattern. */
