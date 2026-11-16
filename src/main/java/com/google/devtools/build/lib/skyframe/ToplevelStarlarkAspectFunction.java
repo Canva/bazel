@@ -168,6 +168,45 @@ final class ToplevelStarlarkAspectFunction implements SkyFunction {
         && admission.topLevelContext() instanceof TopLevelArtifactContext topLevelContext
         && !aspectsKeys.isEmpty()
         && !env.valuesMissing()) {
+      if (admission.withoutValues()) {
+        // One record says that every aspect of the target was built: the one a target that is
+        // not going to be tested is not even asked for its aspects on the strength of. Here the
+        // aspects have been named, which a test needs, and if that record is valid none of them
+        // is asked about.
+        if (state.allCompletedProbe == null) {
+          state.allCompletedProbe = new RetrievalContext[] {new RetrievalContext()};
+        }
+        SkyValueRetrieverUtils.CompletedProbe[] all =
+            SkyValueRetrieverUtils.probeCompleted(
+                ImmutableList.of(
+                    CompletedTopLevelKey.of(
+                        topLevelAspectsKey, topLevelContext, /* willTest= */ false)),
+                state.allCompletedProbe,
+                env,
+                analysisCachingDepsSupplier.get(),
+                admission);
+        if (all == null || env.valuesMissing()) {
+          return null;
+        }
+        if (all[0].valid()) {
+          TopLevelAspectsValue standIn =
+              builtWithoutTheirValues(aspectsKeys, loadAspectsValue.getAspects(), admission);
+          if (standIn != null) {
+            PrecomputedValue.BUILD_ID.get(env);
+            if (env.valuesMissing()) {
+              return null;
+            }
+            // What reports each aspect as built looks for the record of that aspect.
+            for (AspectKey aspectKey : aspectsKeys) {
+              admission.shareProbe(
+                  CompletedTopLevelKey.of(aspectKey, topLevelContext, /* willTest= */ false),
+                  all[0]);
+            }
+            admission.noteAspectsOfATargetBuilt(topLevelAspectsKey);
+            return standIn;
+          }
+        }
+      }
       if (state.completedProbes == null) {
         state.completedProbes = new RetrievalContext[aspectsKeys.size()];
         for (int i = 0; i < state.completedProbes.length; i++) {
@@ -525,6 +564,9 @@ final class ToplevelStarlarkAspectFunction implements SkyFunction {
 
     /** Of the lookups that say whether each aspect was built, in the order of the keys. */
     @Nullable private RetrievalContext[] completedProbes;
+
+    /** For the one record of all the aspects of the target. */
+    @Nullable private RetrievalContext[] allCompletedProbe;
 
     // --------------- Error handling fields ------------------
     @Nullable private String message = null;
