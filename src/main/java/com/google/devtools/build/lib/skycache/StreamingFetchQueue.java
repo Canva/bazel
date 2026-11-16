@@ -291,14 +291,15 @@ final class StreamingFetchQueue implements ReadQueue {
     }
     for (int start = 0; start < keys.size(); start += maxBatchSize) {
       List<ByteString> batch = keys.subList(start, Math.min(keys.size(), start + maxBatchSize));
+      // Counted before it is sent: the answer can be read before this thread goes on.
+      requestsSent.incrementAndGet();
+      keysRequested.addAndGet(batch.size());
       requests.onNext(
           FetchRequest.newBuilder()
               .addAllKeys(batch)
               .setExpand(kind != Kind.UNEXPANDED)
               .setForce(kind == Kind.FORCED)
               .build());
-      requestsSent.incrementAndGet();
-      keysRequested.addAndGet(batch.size());
     }
   }
 
@@ -329,6 +330,12 @@ final class StreamingFetchQueue implements ReadQueue {
       // own: a response of a megabyte can answer thousands of reads, and completing them one
       // after another in one task had every one wait for the deserialization of all before it,
       // on one core, while the others had nothing to do.
+      //
+      // Only once the whole response is in the buffer, though: the reader of an entry asks for
+      // what it references next, which the service usually sent in the same response, further
+      // on. A read completed before those were buffered asks the service for them again.
+      ArrayList<Waiter> waiters = null;
+      ArrayList<ByteString> values = null;
       long delivered = 0;
       Object[] previous = new Object[1];
       for (Entry entry : response.getEntriesList()) {
@@ -344,13 +351,25 @@ final class StreamingFetchQueue implements ReadQueue {
           delivered -= replaced.size(); // Sent twice, after a forced request.
         }
         if (previous[0] instanceof Waiter waiter) {
-          completer.execute(() -> waiter.value.set(value.toByteArray()));
+          if (waiters == null) {
+            waiters = new ArrayList<>();
+            values = new ArrayList<>();
+          }
+          waiters.add(waiter);
+          values.add(value);
         } else {
           delivered += value.size();
         }
       }
       long buffered = bufferedBytes.addAndGet(delivered);
       peakBufferedBytes.accumulateAndGet(buffered, Math::max);
+      if (waiters != null) {
+        for (int i = 0; i < waiters.size(); i++) {
+          Waiter waiter = waiters.get(i);
+          ByteString value = values.get(i);
+          completer.execute(() -> waiter.value.set(value.toByteArray()));
+        }
+      }
       for (ByteString key : response.getMissingList()) {
         if (entries.remove(mapKey(key)) instanceof Waiter waiter) {
           completer.execute(() -> waiter.value.set(null));
