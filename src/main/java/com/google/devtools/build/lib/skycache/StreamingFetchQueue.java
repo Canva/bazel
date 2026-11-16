@@ -324,10 +324,11 @@ final class StreamingFetchQueue implements ReadQueue {
     @Override
     public void onNext(FetchResponse response) {
       entriesReceived.addAndGet(response.getEntriesCount());
-      // Reads are completed off this thread, in one task per response: a completed read runs
-      // deserialization, and running that here would let one core's worth of it gate the stream.
-      ArrayList<Waiter> waiters = null;
-      ArrayList<ByteString> values = null;
+      // Reads are completed off this thread: a completed read runs deserialization, and running
+      // that here would let one core's worth of it gate the stream. And each in a task of its
+      // own: a response of a megabyte can answer thousands of reads, and completing them one
+      // after another in one task had every one wait for the deserialization of all before it,
+      // on one core, while the others had nothing to do.
       long delivered = 0;
       Object[] previous = new Object[1];
       for (Entry entry : response.getEntriesList()) {
@@ -343,12 +344,7 @@ final class StreamingFetchQueue implements ReadQueue {
           delivered -= replaced.size(); // Sent twice, after a forced request.
         }
         if (previous[0] instanceof Waiter waiter) {
-          if (waiters == null) {
-            waiters = new ArrayList<>();
-            values = new ArrayList<>();
-          }
-          waiters.add(waiter);
-          values.add(value);
+          completer.execute(() -> waiter.value.set(value.toByteArray()));
         } else {
           delivered += value.size();
         }
@@ -357,12 +353,7 @@ final class StreamingFetchQueue implements ReadQueue {
       peakBufferedBytes.accumulateAndGet(buffered, Math::max);
       for (ByteString key : response.getMissingList()) {
         if (entries.remove(mapKey(key)) instanceof Waiter waiter) {
-          if (waiters == null) {
-            waiters = new ArrayList<>();
-            values = new ArrayList<>();
-          }
-          waiters.add(waiter);
-          values.add(null);
+          completer.execute(() -> waiter.value.set(null));
         }
       }
       for (ByteString key : response.getAlreadySentList()) {
@@ -372,17 +363,6 @@ final class StreamingFetchQueue implements ReadQueue {
           forced.incrementAndGet();
           send(key, Kind.FORCED);
         }
-      }
-      if (waiters != null) {
-        ArrayList<Waiter> completedWaiters = waiters;
-        ArrayList<ByteString> completedValues = values;
-        completer.execute(
-            () -> {
-              for (int i = 0; i < completedWaiters.size(); i++) {
-                ByteString value = completedValues.get(i);
-                completedWaiters.get(i).value.set(value == null ? null : value.toByteArray());
-              }
-            });
       }
     }
 
