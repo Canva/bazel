@@ -126,6 +126,11 @@ public class BuildDriverFunction implements SkyFunction {
   private Map<BuildDriverKey, Set<TopLevelStatusEvents.Type>> keyToPostedEvents =
       new ConcurrentHashMap<>();
 
+  // Whether this build has said that some execution started, and what a thread holds while it
+  // says so: see #postSomeExecutionStartedOnce.
+  private volatile boolean someExecutionStartedPosted;
+  private final Object someExecutionStartedLock = new Object();
+
   public BuildDriverFunction(
       Supplier<IncrementalArtifactConflictFinder> incrementalArtifactConflictFinder,
       Supplier<RuleContextConstraintSemantics> ruleContextConstraintSemantics,
@@ -565,7 +570,7 @@ public class BuildDriverFunction implements SkyFunction {
           env,
           TopLevelEntityAnalysisConcludedEvent.create(buildDriverKey, /* succeeded= */ true));
 
-      postEventIfNecessary(postedEventsTypes, env, SomeExecutionStartedEvent.create());
+      postSomeExecutionStartedOnce(env);
       // Request the execution of the collected aspects.
       declareDependenciesAndCheckValues(
           env, Iterables.concat(Artifact.keys(artifactsToBuild.build()), aspectCompletionKeys));
@@ -699,6 +704,7 @@ public class BuildDriverFunction implements SkyFunction {
   public void resetStates() {
     checkedForConflicts = Sets.newConcurrentHashSet();
     keyToPostedEvents = new ConcurrentHashMap<>();
+    someExecutionStartedPosted = false;
   }
 
   private void removeStatesForKey(BuildDriverKey key) {
@@ -712,6 +718,28 @@ public class BuildDriverFunction implements SkyFunction {
       TopLevelStatusEventWithType event) {
     if (postedEventsTypes.add(event.getType())) {
       env.getListener().post(event);
+    }
+  }
+
+  /**
+   * Says that some execution started, once a build and not once a top-level target.
+   *
+   * <p>Everything that listens for this event acts on the first one only, and four of the
+   * listeners take one event at a time: in a build of a million top-level targets and aspects,
+   * each of them waited its turn four times to tell them what they knew.
+   *
+   * <p>A target that finds the event being posted waits until it has been, as it did when it
+   * posted its own: the listeners set up what reports on the actions it is about to request.
+   */
+  private void postSomeExecutionStartedOnce(Environment env) {
+    if (someExecutionStartedPosted) {
+      return;
+    }
+    synchronized (someExecutionStartedLock) {
+      if (!someExecutionStartedPosted) {
+        env.getListener().post(SomeExecutionStartedEvent.create());
+        someExecutionStartedPosted = true;
+      }
     }
   }
 
@@ -808,7 +836,7 @@ public class BuildDriverFunction implements SkyFunction {
         buildDriverKey.isExtraActionTopLevelOnly());
     ImmutableSet.Builder<SkyKey> keysToRequest =
         ImmutableSet.<SkyKey>builder().addAll(Artifact.keys(artifactsToBuild.build()));
-    postEventIfNecessary(postedEventsTypes, env, SomeExecutionStartedEvent.create());
+    postSomeExecutionStartedOnce(env);
 
     boolean targetIsTest = isTest(testType);
     SkyKey targetCompletionKey =

@@ -136,6 +136,15 @@ public final class ExecutionValueCaching {
     return completions && enabled ? topLevelAdmission : null;
   }
 
+  /**
+   * Whether this command reports the target or aspect of the given key as built from its record,
+   * without its value: what is left to do for it then has nothing to execute or to wait for.
+   */
+  public static boolean builtWithoutItsValue(Object actionLookupKey) {
+    TopLevelAdmission admission = topLevelAdmission();
+    return admission != null && admission.builtValue(actionLookupKey) != null;
+  }
+
   /** How this command's top-level keys were ordered, or an empty string if they were not. */
   public static String topLevelAdmissionSummary() {
     TopLevelAdmission admission = topLevelAdmission;

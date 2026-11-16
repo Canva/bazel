@@ -17,6 +17,7 @@ import com.google.auto.value.AutoValue;
 import com.google.common.collect.Iterables;
 import com.google.devtools.build.lib.analysis.ConfiguredTarget;
 import com.google.devtools.build.lib.analysis.TopLevelArtifactContext;
+import com.google.devtools.build.lib.skyframe.serialization.analysis.ExecutionValueCaching;
 import com.google.devtools.build.lib.skyframe.serialization.autocodec.SerializationConstant;
 import com.google.devtools.build.skyframe.SkyFunctionName;
 import com.google.devtools.build.skyframe.SkyValue;
@@ -52,6 +53,13 @@ public class TargetCompletionValue implements SkyValue {
   @AutoValue
   public abstract static class TargetCompletionKey
       implements TopLevelActionLookupKeyWrapper, StallableSkykey {
+    @Override
+    public boolean evaluatedWithAnalysis() {
+      // A reader of the analysis cache that took this one from a record of what was built only
+      // has that to report.
+      return ExecutionValueCaching.builtWithoutItsValue(actionLookupKey());
+    }
+
     static TargetCompletionKey create(
         ConfiguredTargetKey actionLookupKey,
         TopLevelArtifactContext topLevelArtifactContext,

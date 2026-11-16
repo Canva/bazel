@@ -14,6 +14,7 @@
 package com.google.devtools.build.lib.buildtool;
 
 import com.google.common.collect.ImmutableSet;
+import com.google.common.eventbus.AllowConcurrentEvents;
 import com.google.common.eventbus.Subscribe;
 import com.google.common.flogger.GoogleLogger;
 import com.google.devtools.build.lib.actions.BuildFailedException;
@@ -298,7 +299,11 @@ public final class AnalysisAndExecutionPhaseRunner {
       return watcher;
     }
 
+    // The three events that follow are posted once a top-level target, aspect or test, by every
+    // thread that analyzes: taking them one at a time has those threads queue for each, and what
+    // the modules keep of them is kept in concurrent collections.
     @Subscribe
+    @AllowConcurrentEvents
     public void handleTopLevelTargetAnalysisConcluded(TopLevelTargetAnalyzedEvent e)
         throws ViewCreationFailedException, InterruptedException {
       for (BlazeModule blazeModule : blazeModules) {
@@ -308,6 +313,7 @@ public final class AnalysisAndExecutionPhaseRunner {
     }
 
     @Subscribe
+    @AllowConcurrentEvents
     public void handleAspectAnalyzed(AspectAnalyzedEvent e) {
       for (BlazeModule blazeModule : blazeModules) {
         blazeModule.afterSingleAspectAnalysis(buildRequest, e.configuredAspect());
@@ -315,6 +321,7 @@ public final class AnalysisAndExecutionPhaseRunner {
     }
 
     @Subscribe
+    @AllowConcurrentEvents
     public void handleTestAnalyzed(TestAnalyzedEvent e) {
       for (BlazeModule blazeModule : blazeModules) {
         blazeModule.afterSingleTestAnalysis(buildRequest, e.configuredTarget());

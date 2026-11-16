@@ -152,6 +152,30 @@ public class AnsiTerminalPrinter {
   }
 
   /**
+   * Returns a printer that writes into the given buffer what this one would write to its stream,
+   * starting from the default mode: for a caller that prepares, on several threads, what {@link
+   * #printPrepared} then prints in order.
+   */
+  public AnsiTerminalPrinter preparingInto(ByteArrayOutputStream buffer) {
+    return new AnsiTerminalPrinter(buffer, useColor);
+  }
+
+  /** Prints what a printer from {@link #preparingInto} wrote into the given buffer, and flushes. */
+  public void printPrepared(ByteArrayOutputStream prepared) {
+    try {
+      // What was prepared starts from the default mode.
+      setupTerminal(Mode.DEFAULT);
+      held.writeTo(stream);
+      prepared.writeTo(stream);
+      stream.flush();
+    } catch (IOException e) {
+      // As in #print.
+    } finally {
+      held.reset();
+    }
+  }
+
+  /**
    * Returns the underlying OutputStream.
    */
   public OutputStream getOutputStream() {

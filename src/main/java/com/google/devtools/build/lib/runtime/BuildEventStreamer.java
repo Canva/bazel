@@ -349,9 +349,8 @@ public class BuildEventStreamer {
    * reconsider: in one go, because a build with a million top-level targets reports several
    * million events, from hundreds of threads, and each wait for the lock is a turn in that queue.
    */
-  private Set<BuildEvent> postAndTakeBlocked(BuildEvent event) {
-    BuildEventId id = event.getEventId();
-    Collection<BuildEventId> children = event.getChildrenEvents();
+  private Set<BuildEvent> postAndTakeBlocked(
+      BuildEvent event, BuildEventId id, Collection<BuildEventId> children) {
     synchronized (this) {
       post(event, id, children);
       return pendingEvents.removeAll(id);
@@ -708,7 +707,7 @@ public class BuildEventStreamer {
       !"false".equals(System.getProperty("canva.build_events.hand_over"));
 
   /** Events reported and not yet handled, in the order they are going to be. */
-  private final ConcurrentLinkedQueue<BuildEvent> reported = new ConcurrentLinkedQueue<>();
+  private final ConcurrentLinkedQueue<Runnable> reported = new ConcurrentLinkedQueue<>();
 
   /** Whether a thread is handling the events in {@link #reported}. */
   private final AtomicBoolean handling = new AtomicBoolean();
@@ -736,13 +735,35 @@ public class BuildEventStreamer {
       handle(event);
       return;
     }
-    reported.add(event);
+    if (event instanceof ActionExecutedEvent actionExecutedEvent
+        && !shouldPublishActionExecutedEvent(actionExecutedEvent)) {
+      // Most events of a build that runs its actions, and nothing waits for one of them.
+      return;
+    }
+    // What can be worked out about an event without the others, the thread that reports it works
+    // out: its id, those of its children and of the events it follows, and their hashes, which
+    // the sets of ids of this class would otherwise have the one handling thread compute. An
+    // event builds these each time it is asked, from strings it interns.
+    BuildEventId id = event.getEventId();
+    Collection<BuildEventId> children = event.getChildrenEvents();
+    Collection<BuildEventId> postedAfter =
+        event instanceof BuildEventWithOrderConstraint constrained
+            ? constrained.postedAfter()
+            : ImmutableList.of();
+    int unused = id.hashCode();
+    for (BuildEventId child : children) {
+      unused += child.hashCode();
+    }
+    for (BuildEventId prerequisite : postedAfter) {
+      unused += prerequisite.hashCode();
+    }
+    reported.add(() -> handle(event, id, children, postedAfter));
     // An event added after the handling thread last looked is seen here or there: this thread
     // adds and then tries the flag, that one clears the flag and then looks at the queue.
     while (!reported.isEmpty() && handling.compareAndSet(false, true)) {
       try {
-        for (BuildEvent next = reported.poll(); next != null; next = reported.poll()) {
-          handle(next);
+        for (Runnable next = reported.poll(); next != null; next = reported.poll()) {
+          next.run();
         }
       } finally {
         handling.set(false);
@@ -751,11 +772,29 @@ public class BuildEventStreamer {
   }
 
   private void handle(BuildEvent event) {
+    handle(
+        event,
+        event.getEventId(),
+        /* children= */ null,
+        event instanceof BuildEventWithOrderConstraint constrained
+            ? constrained.postedAfter()
+            : ImmutableList.of());
+  }
+
+  /**
+   * Handles an event whose id, and the ids of the events it follows, the caller has worked out.
+   *
+   * @param children the ids of its children if the caller has worked those out as well
+   */
+  private void handle(
+      BuildEvent event,
+      BuildEventId eventId,
+      @Nullable Collection<BuildEventId> children,
+      Collection<BuildEventId> postedAfter) {
     if (finalEventsToCome != null) {
       synchronized (this) {
-        BuildEventId id = event.getEventId();
-        if (finalEventsToCome.contains(id)) {
-          finalEventsToCome.remove(id);
+        if (finalEventsToCome.contains(eventId)) {
+          finalEventsToCome.remove(eventId);
         } else {
           return;
         }
@@ -774,7 +813,7 @@ public class BuildEventStreamer {
       }
     }
 
-    switch (routeBuildEvent(event)) {
+    switch (routeBuildEvent(event, eventId, postedAfter)) {
       case DISCARD:
         // Check if there are pending events waiting on this event
         maybePostPendingEventsBeforeDiscarding(event);
@@ -814,8 +853,8 @@ public class BuildEventStreamer {
     }
 
     if (event instanceof BuildCompletingEvent
-        && !event.getEventId().equals(BuildEventIdUtil.buildStartedId())) {
-      clearMissingStartEvent(event.getEventId());
+        && !eventId.equals(BuildEventIdUtil.buildStartedId())) {
+      clearMissingStartEvent(eventId);
     }
 
     // Reconsider all events blocked by the event just posted.
@@ -823,10 +862,12 @@ public class BuildEventStreamer {
     if (event instanceof BuildConfigurationEvent) {
       maybeReportConfiguration(event);
       synchronized (this) {
-        blockedEventsFifo = pendingEvents.removeAll(event.getEventId());
+        blockedEventsFifo = pendingEvents.removeAll(eventId);
       }
     } else {
-      blockedEventsFifo = postAndTakeBlocked(event);
+      blockedEventsFifo =
+          postAndTakeBlocked(
+              event, eventId, children != null ? children : event.getChildrenEvents());
     }
     for (BuildEvent freedEvent : blockedEventsFifo) {
       // Replaceable events have been replaced, so can be silently dropped.
@@ -1085,18 +1126,19 @@ public class BuildEventStreamer {
   }
 
   /** Returns whether a {@link BuildEvent} should be ignored or was buffered. */
-  private RetentionDecision routeBuildEvent(BuildEvent event) {
+  private RetentionDecision routeBuildEvent(
+      BuildEvent event, BuildEventId eventId, Collection<BuildEventId> postedAfter) {
     if (event instanceof ActionExecutedEvent actionExecutedEvent
         && !shouldPublishActionExecutedEvent(actionExecutedEvent)) {
       return RetentionDecision.DISCARD;
     }
 
-    RetentionDecision replaceableDecision = decideBufferedForReplacementEvent(event);
+    RetentionDecision replaceableDecision = decideBufferedForReplacementEvent(event, eventId);
     if (replaceableDecision != null) {
       return replaceableDecision;
     }
 
-    if (bufferUntilPrerequisitesReceived(event)) {
+    if (bufferUntilPrerequisitesReceived(event, postedAfter)) {
       return RetentionDecision.BUFFERED;
     }
 
@@ -1140,7 +1182,7 @@ public class BuildEventStreamer {
   }
 
   @Nullable
-  private RetentionDecision decideBufferedForReplacementEvent(BuildEvent event) {
+  private RetentionDecision decideBufferedForReplacementEvent(BuildEvent event, BuildEventId id) {
     // Asked of every event, and all but a few are not replaceable: no reason to wait for the lock
     // to find that out.
     if (!(event instanceof ReplaceableBuildEvent replaceableBuiltEvent)) {
@@ -1150,29 +1192,25 @@ public class BuildEventStreamer {
       // The event's class is replaceable but this instance isn't. Treat it normally.
       return RetentionDecision.POST;
     }
-    BuildEventId id = event.getEventId();
     synchronized (this) {
       if (isPosted(id)) {
         // This event type has already been posted, so the replaceable event is outdated.
         return RetentionDecision.DISCARD;
       }
       Verify.verify(
-          pendingEvents.get(event.getEventId()).stream()
+          pendingEvents.get(id).stream()
               .filter(e -> e instanceof ReplaceableBuildEvent)
               .findFirst()
               .isEmpty(),
           "Multiple replaceable events not supported for %s",
-          event.getEventId());
-      pendingEvents.put(event.getEventId(), event);
+          id);
+      pendingEvents.put(id, event);
     }
     return RetentionDecision.BUFFERED_FOR_REPLACEMENT;
   }
 
-  private boolean bufferUntilPrerequisitesReceived(BuildEvent event) {
-    if (!(event instanceof BuildEventWithOrderConstraint buildEventWithOrderConstraint)) {
-      return false;
-    }
-    Collection<BuildEventId> prerequisiteIds = buildEventWithOrderConstraint.postedAfter();
+  private boolean bufferUntilPrerequisitesReceived(
+      BuildEvent event, Collection<BuildEventId> prerequisiteIds) {
     if (prerequisiteIds.isEmpty()) {
       return false;
     }

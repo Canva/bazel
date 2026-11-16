@@ -255,7 +255,8 @@ class NodeEntryVisitor {
       if (key instanceof CPUHeavySkyKey) {
         threadPoolType = ThreadPoolType.CPU_HEAVY;
       } else if (multiThreadPoolsQuiescingExecutor.hasSeparatePoolForExecutionTasks()
-          && key instanceof ExecutionPhaseSkyKey) {
+          && key instanceof ExecutionPhaseSkyKey executionPhaseKey
+          && !executionPhaseKey.evaluatedWithAnalysis()) {
         // Only possible with --experimental_merged_skyframe_analysis_execution.
         threadPoolType = ThreadPoolType.EXECUTION_PHASE;
       } else {

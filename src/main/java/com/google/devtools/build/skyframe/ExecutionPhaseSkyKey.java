@@ -13,5 +13,18 @@
 // limitations under the License.
 package com.google.devtools.build.skyframe;
 
-/** An empty interface used to annotate if a SkyKey is part of the conceptual Execution phase. */
-public interface ExecutionPhaseSkyKey extends SkyKey {}
+/** An interface used to annotate if a SkyKey is part of the conceptual Execution phase. */
+public interface ExecutionPhaseSkyKey extends SkyKey {
+  /**
+   * Whether this key, although of the execution phase, is to be evaluated by the threads that
+   * analyze: because it is known to have nothing to execute or to wait for.
+   *
+   * <p>The threads that execute are as many as there are jobs, hundreds where actions run
+   * remotely, and are meant to spend their time waiting. Handing them a million tasks of a few
+   * microseconds each has them wake, look for the task and go back to sleep, at the cost of more
+   * processor time than the tasks take.
+   */
+  default boolean evaluatedWithAnalysis() {
+    return false;
+  }
+}
