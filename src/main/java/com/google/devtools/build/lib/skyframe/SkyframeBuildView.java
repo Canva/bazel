@@ -687,7 +687,7 @@ public final class SkyframeBuildView {
     SilentCloseable creatingDriverKeys = Profiler.instance().profile("createBuildDriverKeys");
 
     ImmutableSet<BuildDriverKey> buildDriverCTKeys =
-        ctKeys.stream()
+        ctKeys.parallelStream()
             .map(
                 ctKey ->
                     BuildDriverKey.ofConfiguredTarget(
@@ -701,7 +701,7 @@ public final class SkyframeBuildView {
             .collect(ImmutableSet.toImmutableSet());
 
     ImmutableSet<BuildDriverKey> buildDriverAspectKeys =
-        topLevelAspectsKeys.stream()
+        topLevelAspectsKeys.parallelStream()
             // The aspects of a target that is recorded as built with them have nothing to do.
             .filter(k -> !builtWithTheirAspects.contains(k.getBaseConfiguredTargetKey()))
             .map(

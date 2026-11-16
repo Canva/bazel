@@ -82,6 +82,8 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiConsumer;
 import javax.annotation.Nullable;
@@ -462,7 +464,7 @@ public class BuildEventStreamer {
           pendingEvents.get(BuildEventIdUtil.buildStartedId()).stream()
               .map(BuildEvent::getEventId)
               .collect(ImmutableSet.toImmutableSet()));
-      buildEvent(
+      handle(
           new AbortedEvent(
               BuildEventIdUtil.buildStartedId(),
               children.build(),
@@ -489,7 +491,7 @@ public class BuildEventStreamer {
             children.add(bufferedId);
           }
         }
-        buildEvent(
+        handle(
             new AbortedEvent(id, children.build(), getLastAbortReason(), getAbortReasonDetails()));
       }
     }
@@ -697,9 +699,58 @@ public class BuildEventStreamer {
     return bufferedEventIDs.build();
   }
 
+  /**
+   * Whether a thread that reports an event while another is handling events leaves it with that
+   * thread. For comparing the two: -Dcanva.build_events.hand_over=false has every thread wait for
+   * the lock and handle its own, as before.
+   */
+  private static final boolean HAND_OVER_EVENTS =
+      !"false".equals(System.getProperty("canva.build_events.hand_over"));
+
+  /** Events reported and not yet handled, in the order they are going to be. */
+  private final ConcurrentLinkedQueue<BuildEvent> reported = new ConcurrentLinkedQueue<>();
+
+  /** Whether a thread is handling the events in {@link #reported}. */
+  private final AtomicBoolean handling = new AtomicBoolean();
+
+  /**
+   * Handles an event, now or soon: if another thread is handling events, that thread handles this
+   * one as well, after those reported before it, and this call returns without waiting.
+   *
+   * <p>Events are reported by every thread that analyzes or builds something, and each used to
+   * wait its turn for this object's lock. A build of half a million top-level targets served from
+   * a cache reports over a million events in a quarter of a minute: thread dumps showed hundreds
+   * of threads in that queue at any moment, which set the pace of the build although the work
+   * under the lock is a few microseconds an event. Now a thread that finds the events being
+   * handled leaves its own with them.
+   *
+   * <p>Events of one thread are still handled in the order it reported them. When a thread that
+   * found nothing being handled returns, every event reported before its own has been handled;
+   * so each event a command reports after its other threads are done is handled before the
+   * command goes on.
+   */
   @Subscribe
   @AllowConcurrentEvents
   public void buildEvent(BuildEvent event) {
+    if (!HAND_OVER_EVENTS) {
+      handle(event);
+      return;
+    }
+    reported.add(event);
+    // An event added after the handling thread last looked is seen here or there: this thread
+    // adds and then tries the flag, that one clears the flag and then looks at the queue.
+    while (!reported.isEmpty() && handling.compareAndSet(false, true)) {
+      try {
+        for (BuildEvent next = reported.poll(); next != null; next = reported.poll()) {
+          handle(next);
+        }
+      } finally {
+        handling.set(false);
+      }
+    }
+  }
+
+  private void handle(BuildEvent event) {
     if (finalEventsToCome != null) {
       synchronized (this) {
         BuildEventId id = event.getEventId();
@@ -780,7 +831,7 @@ public class BuildEventStreamer {
     for (BuildEvent freedEvent : blockedEventsFifo) {
       // Replaceable events have been replaced, so can be silently dropped.
       if (!(freedEvent instanceof ReplaceableBuildEvent)) {
-        buildEvent(freedEvent);
+        handle(freedEvent);
       }
     }
 
@@ -853,7 +904,7 @@ public class BuildEventStreamer {
         }
       }
       for (BuildEvent freedEvent : blockedEventsFifo) {
-        buildEvent(freedEvent);
+        handle(freedEvent);
       }
     }
   }

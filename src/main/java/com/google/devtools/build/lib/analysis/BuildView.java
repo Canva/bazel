@@ -382,8 +382,9 @@ public class BuildView {
     ImmutableList<ConfiguredTargetKey> topLevelCtKeys;
     ImmutableList<TopLevelAspectsKey> aspectKeys;
     try (SilentCloseable c = Profiler.instance().profile("createTopLevelKeys")) {
+      // Half a million keys in a build of a monorepo, each interned: on every core.
       topLevelCtKeys =
-          labelToTargetMap.keySet().stream()
+          labelToTargetMap.keySet().parallelStream()
               .map(
                   label ->
                       ConfiguredTargetKey.builder()
@@ -655,7 +656,7 @@ public class BuildView {
       return ImmutableList.of();
     }
 
-    return topLevelTargets.entrySet().stream()
+    return topLevelTargets.entrySet().parallelStream()
         // Do not run aspects on materializer targets since registering actions is not allowed in
         // materializer rules (and thus aspects that run on them) and many aspects do register
         // actions, and there isn't much for an aspect to do on a materializer target anyway.
