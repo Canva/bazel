@@ -255,10 +255,20 @@ public class BuildDriverFunction implements SkyFunction {
             actionLookupKey, probes[0].valid(), env, admission)) {
           return null;
         }
-      } else if (actionLookupKey instanceof TopLevelAspectsKey && admission.withoutValues()) {
+      } else if (actionLookupKey instanceof TopLevelAspectsKey aspectsKey
+          && admission.withoutValues()
+          && !isTest(
+              testTypeResolver
+                  .get()
+                  .determineTestType(
+                      new BuiltTopLevelTargetValue(aspectsKey.getBaseConfiguredTargetKey())
+                          .getConfiguredTarget()))) {
         // One record says that every aspect of the target was built. If it is valid, nothing
         // here needs to know which aspects those are, which would take the target's package and
         // its configuration, nor to ask about each of them.
+        //
+        // Not for a target that is going to be tested: a test counts as built only if its
+        // validation aspect is among the aspects that succeeded, so those are named.
         if (state.completedProbes == null) {
           state.completedProbes = new RetrievalContext[] {new RetrievalContext()};
         }
