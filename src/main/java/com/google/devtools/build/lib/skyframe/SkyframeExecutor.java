@@ -975,7 +975,7 @@ public abstract class SkyframeExecutor implements WalkableGraphFactory {
             actionRewindStrategy,
             bugReporter,
             this::getRemoteAnalysisCacheReaderDepsProvider));
-    map.put(SkyFunctions.TEST_COMPLETION, new TestCompletionFunction());
+    map.put(SkyFunctions.TEST_COMPLETION, new TestCompletionFunction(skyframeActionExecutor));
     map.put(
         Artifact.ARTIFACT,
         new ArtifactFunction(

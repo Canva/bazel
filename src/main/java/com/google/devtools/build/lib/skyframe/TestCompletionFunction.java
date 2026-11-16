@@ -22,12 +22,15 @@ import com.google.devtools.build.lib.actions.ExecException;
 import com.google.devtools.build.lib.analysis.ConfiguredTarget;
 import com.google.devtools.build.lib.analysis.ConfiguredTargetValue;
 import com.google.devtools.build.lib.analysis.TopLevelArtifactContext;
+import com.google.devtools.build.lib.analysis.test.ServedTest;
 import com.google.devtools.build.lib.analysis.test.TestAttempt;
 import com.google.devtools.build.lib.analysis.test.TestProvider;
 import com.google.devtools.build.lib.analysis.test.TestResult;
 import com.google.devtools.build.lib.analysis.test.TestRunnerAction;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.server.FailureDetails.Execution.Code;
+import com.google.devtools.build.lib.skyframe.serialization.analysis.ExecutionValueCaching;
+import com.google.devtools.build.lib.skyframe.serialization.analysis.TopLevelAdmission;
 import com.google.devtools.build.lib.util.DetailedExitCode;
 import com.google.devtools.build.lib.util.ExitCode;
 import com.google.devtools.build.lib.view.test.TestStatus.BlazeTestStatus;
@@ -45,6 +48,12 @@ import javax.annotation.Nullable;
  * runs.
  */
 public final class TestCompletionFunction implements SkyFunction {
+  private final SkyframeActionExecutor skyframeActionExecutor;
+
+  TestCompletionFunction(SkyframeActionExecutor skyframeActionExecutor) {
+    this.skyframeActionExecutor = skyframeActionExecutor;
+  }
+
   @Override
   @Nullable
   public SkyValue compute(SkyKey skyKey, Environment env) throws InterruptedException {
@@ -54,6 +63,26 @@ public final class TestCompletionFunction implements SkyFunction {
     TopLevelArtifactContext ctx = key.topLevelArtifactContext();
     if (env.getValue(TargetCompletionValue.key(ctKey, ctx, /* willTest= */ true)) == null) {
       return null;
+    }
+
+    // A reader of the analysis cache that found the results of this target's tests in the record
+    // of the target reports them from there. Each is the result its action's node would retrieve
+    // and report in the same way, and the record is valid exactly when they are; but the node
+    // needs the action, which needs the target, and the target is most of what a test costs a
+    // reader. See ServedTest.
+    TopLevelAdmission admission = ExecutionValueCaching.topLevelAdmission();
+    if (admission != null && admission.servedTest(ctKey) instanceof ServedTest served) {
+      // The results stand for this build only as long as the record does, and nothing in the
+      // graph ties this value to the sources: as for a target's completion, depend on the build.
+      PrecomputedValue.BUILD_ID.get(env);
+      if (env.valuesMissing()) {
+        return null;
+      }
+      if (reportServed(served)) {
+        admission.noteServedTestReported();
+        return TestCompletionValue.TEST_COMPLETION_MARKER;
+      }
+      // Declined, with nothing reported: the target and its actions are asked for after all.
     }
 
     ConfiguredTargetValue ctValue = (ConfiguredTargetValue) env.getValue(ctKey);
@@ -94,6 +123,31 @@ public final class TestCompletionFunction implements SkyFunction {
       }
     }
     return TestCompletionValue.TEST_COMPLETION_MARKER;
+  }
+
+  /**
+   * Reports each result of {@code served} as its action's node would on retrieving it. Returns
+   * false, having reported nothing, if a test does not take the result it has.
+   */
+  private boolean reportServed(ServedTest served) {
+    for (int i = 0; i < served.actions().size(); i++) {
+      if (!(served.results().get(i) instanceof ActionExecutionValue result)
+          || served.actions().get(i).whyRetrievedResultIsDeclined(result.getAllFileValues()::get)
+              != null) {
+        return false;
+      }
+    }
+    boolean all = true;
+    for (int i = 0; i < served.actions().size(); i++) {
+      if (skyframeActionExecutor.notifyResultRetrieved(
+          served.actions().get(i), (ActionExecutionValue) served.results().get(i))) {
+        ExecutionValueCaching.noteTestResult("served");
+      } else {
+        all = false;
+      }
+    }
+    // Each was asked whether it takes its result before any was told to.
+    return all;
   }
 
   @Override

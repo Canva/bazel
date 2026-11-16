@@ -104,10 +104,47 @@ public final class TopLevelAdmission {
     this(window, withoutValues, /* byPackage= */ false);
   }
 
+  /**
+   * Whether a reader reports a test whose results its record carries without fetching the test's
+   * target.
+   */
+  private final boolean servedTests;
+
+  /** By the key a test's target was built with, what its record carries: a {@code ServedTest}. */
+  private final ConcurrentHashMap<Object, Object> served = new ConcurrentHashMap<>();
+
+  private final AtomicLong servedReported = new AtomicLong();
+
   public TopLevelAdmission(int window, boolean withoutValues, boolean byPackage) {
+    this(window, withoutValues, byPackage, /* servedTests= */ false);
+  }
+
+  public TopLevelAdmission(
+      int window, boolean withoutValues, boolean byPackage, boolean servedTests) {
     this.window = window;
     this.withoutValues = withoutValues;
     this.byPackage = byPackage;
+    this.servedTests = servedTests;
+  }
+
+  public boolean servedTests() {
+    return withoutValues && servedTests;
+  }
+
+  /** Keeps what a test's record carries, for the function that reports the test's results. */
+  public void putServedTest(Object builtWith, Object servedTest) {
+    served.putIfAbsent(builtWith, servedTest);
+  }
+
+  /** What {@link #putServedTest} kept for the key, or null. */
+  @Nullable
+  public Object servedTest(Object builtWith) {
+    return served.get(builtWith);
+  }
+
+  /** Notes that the results of a test were reported from its record. */
+  public void noteServedTestReported() {
+    servedReported.incrementAndGet();
   }
 
   public boolean byPackage() {
@@ -304,7 +341,13 @@ public final class TopLevelAdmission {
             : String.format(
                 "; %d packages asked which of their targets were built, %d valid, answering for"
                     + " %d targets",
-                packagesAsked, packagesValid, targetsOfPackages));
+                packagesAsked, packagesValid, targetsOfPackages))
+        + (served.isEmpty()
+            ? ""
+            : String.format(
+                "; %d tests had their results in their records, and %d were reported from them"
+                    + " without their targets being fetched",
+                served.size(), servedReported.get()));
   }
 
   private double seconds(long nanos) {

@@ -69,6 +69,7 @@ java_library(
         "starlark/StarlarkSubrule.java",
         "starlark/StarlarkTemplateContext.java",
         "test/InstrumentedFilesCollector.java",
+        "test/ServedTest.java",
         "test/TestActionBuilder.java",
         "test/TestActionContext.java",
         "test/TestAttempt.java",
@@ -115,6 +116,8 @@ java_library(
         "//src/main/java/com/google/devtools/build/lib/analysis/actions:symlink_tree_action",
     ],
     deps = [
+        "//src/main/java/com/google/devtools/build/lib/actions:action_lookup_data",
+        "//src/main/java/com/google/devtools/build/skyframe:skyframe-objects",
         ":actions_provider",
         ":alias_provider",
         ":analysis_environment",

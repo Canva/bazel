@@ -105,6 +105,18 @@ public final class SkyValueRetrieverUtils {
           ? completed.builtWith()
           : null;
     }
+
+    /**
+     * What the record carries of a target whose tests all passed, a {@code ServedTest}, if it is
+     * valid and carries it: see {@link CompletedTopLevelValue}.
+     */
+    @Nullable
+    Object servedTest() {
+      return result instanceof RetrievedValue(SkyValue value)
+              && value instanceof CompletedTopLevelValue completed
+          ? completed.servedTest()
+          : null;
+    }
   }
 
   /**

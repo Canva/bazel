@@ -32,9 +32,11 @@ import com.google.common.util.concurrent.ListenableFuture;
 import com.google.devtools.build.lib.actions.ActionLookupData;
 import com.google.devtools.build.lib.actions.ActionLookupKey;
 import com.google.devtools.build.lib.actions.ActionLookupSummaryKey;
+import com.google.devtools.build.lib.actions.ActionLookupValue;
 import com.google.devtools.build.lib.actions.Artifact.DerivedArtifact;
 import com.google.devtools.build.lib.analysis.ConfiguredTarget;
 import com.google.devtools.build.lib.analysis.ConfiguredTargetValue;
+import com.google.devtools.build.lib.analysis.test.ServedTest;
 import com.google.devtools.build.lib.cmdline.PackageIdentifier;
 import com.google.devtools.build.lib.compress.CompressionService;
 import com.google.devtools.build.lib.concurrent.QuiescingFuture;
@@ -518,7 +520,7 @@ final class SelectedEntrySerializer {
    * was not tested, the key it was built with as well. See {@link CompletedTopLevelValue}.
    */
   private CompletedTopLevelValue completedValue(ActionLookupKey builtWith, boolean willTest) {
-    if (willTest || !(builtWith instanceof ConfiguredTargetKey)) {
+    if (!(builtWith instanceof ConfiguredTargetKey)) {
       return CompletedTopLevelValue.INSTANCE;
     }
     InMemoryNodeEntry node = graph.getIfPresent(builtWith);
@@ -536,7 +538,32 @@ final class SelectedEntrySerializer {
         || !builtWith.equals(target.getLookupKey())) {
       return CompletedTopLevelValue.INSTANCE;
     }
-    return CompletedTopLevelValue.builtWith(builtWith);
+    if (!willTest) {
+      return CompletedTopLevelValue.builtWith(builtWith);
+    }
+    // A target that was tested: a reader reports its tests from their results, which it needs
+    // the target for. If every result is one a reader can take, the record carries them and
+    // what the target says about its tests, and the reader does not fetch the target.
+    if (!ExecutionValueCaching.testResultsEnabled()
+        || !(node.getValue() instanceof ActionLookupValue actions)) {
+      return CompletedTopLevelValue.INSTANCE;
+    }
+    ServedTest served = ServedTest.of(target, actions, this::testResultForReader);
+    return served == null
+        ? CompletedTopLevelValue.INSTANCE
+        : CompletedTopLevelValue.tested(builtWith, served);
+  }
+
+  /** The result of a test action as it is uploaded for readers, or null if it is not. */
+  @Nullable
+  private ActionExecutionValue testResultForReader(ActionLookupData action) {
+    InMemoryNodeEntry node = graph.getIfPresent(action);
+    return node != null
+            && node.isDone()
+            && node.getValue() instanceof ActionExecutionValue value
+            && ExecutionValuesForReaders.isTestResult(value)
+        ? ExecutionValuesForReaders.forReader(value)
+        : null;
   }
 
   /**

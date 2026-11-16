@@ -209,7 +209,8 @@ public final class SkycacheModule extends SerializationModule {
     ExecutionValueCaching.resetTopLevelAdmission(
         enabled && fetchOptions != null ? fetchOptions.getTopLevelWindow() : 0,
         fetchOptions != null && fetchOptions.getBuiltWithoutValues(),
-        fetchOptions != null && fetchOptions.getBuiltByPackage());
+        fetchOptions != null && fetchOptions.getBuiltByPackage(),
+        fetchOptions != null && fetchOptions.getServedTests());
     ExecutionValueCaching.resetTestResultOutcomes();
     // A reader has the configured targets of its dependencies without their packages, and still
     // needs a root for the files of an external repository that an action reports having read: see

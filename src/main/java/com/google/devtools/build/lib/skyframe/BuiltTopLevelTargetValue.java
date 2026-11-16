@@ -20,6 +20,7 @@ import com.google.devtools.build.lib.analysis.FileProvider;
 import com.google.devtools.build.lib.analysis.FilesToRunProvider;
 import com.google.devtools.build.lib.analysis.TransitiveInfoProvider;
 import com.google.devtools.build.lib.analysis.configuredtargets.AbstractConfiguredTarget;
+import com.google.devtools.build.lib.analysis.test.TestProvider;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.collect.nestedset.Order;
@@ -48,7 +49,15 @@ final class BuiltTopLevelTargetValue implements ConfiguredTargetValue {
    * @param builtWith the key the target was built with, which is the key of its node
    */
   BuiltTopLevelTargetValue(ActionLookupKey builtWith) {
-    this.target = new BuiltTarget(builtWith);
+    this(builtWith, /* tests= */ null);
+  }
+
+  /**
+   * @param tests for a target that is going to be tested, what it says about its tests. Whatever
+   *     reports a test asks its target for this, and for nothing else.
+   */
+  BuiltTopLevelTargetValue(ActionLookupKey builtWith, @Nullable TestProvider tests) {
+    this.target = new BuiltTarget(builtWith, tests);
   }
 
   @Override
@@ -71,8 +80,11 @@ final class BuiltTopLevelTargetValue implements ConfiguredTargetValue {
   }
 
   private static final class BuiltTarget extends AbstractConfiguredTarget {
-    private BuiltTarget(ActionLookupKey builtWith) {
+    @Nullable private final TestProvider tests;
+
+    private BuiltTarget(ActionLookupKey builtWith, @Nullable TestProvider tests) {
       super(builtWith, NestedSetBuilder.emptySet(Order.STABLE_ORDER));
+      this.tests = tests;
     }
 
     @Override
@@ -93,6 +105,9 @@ final class BuiltTopLevelTargetValue implements ConfiguredTargetValue {
       }
       if (provider == FilesToRunProvider.class) {
         return provider.cast(FilesToRunProvider.EMPTY);
+      }
+      if (provider == TestProvider.class && tests != null) {
+        return provider.cast(tests);
       }
       return super.getProvider(provider);
     }

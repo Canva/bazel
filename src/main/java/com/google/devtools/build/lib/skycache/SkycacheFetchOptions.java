@@ -124,4 +124,15 @@ public abstract class SkycacheFetchOptions extends OptionsBase {
               + " aspects. A package nothing has changed under answers for every target in it,"
               + " which is then not asked about. Experimental.")
   public abstract boolean getBuiltByPackage();
+
+  @Option(
+      name = "canva_skycache_served_tests",
+      defaultValue = "true",
+      documentationCategory = OptionDocumentationCategory.UNDOCUMENTED,
+      effectTags = {OptionEffectTag.BAZEL_INTERNAL_CONFIGURATION},
+      help =
+          "With --canva_skycache_built_without_values, a reader reports a test whose results are"
+              + " in the record of its target without fetching the target, which is otherwise"
+              + " fetched whole to report results the cache already holds. Experimental.")
+  public abstract boolean getServedTests();
 }

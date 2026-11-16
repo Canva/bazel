@@ -3898,7 +3898,11 @@ java_library(
     name = "test_completion_function",
     srcs = ["TestCompletionFunction.java"],
     deps = [
+        ":action_execution_value",
         ":configured_target_key",
+        ":precomputed_value",
+        ":skyframe_action_executor",
+        "//src/main/java/com/google/devtools/build/lib/skyframe/serialization/analysis:execution_value_caching",
         ":target_completion_value",
         ":test_completion_value",
         "//src/main/java/com/google/devtools/build/lib/actions",

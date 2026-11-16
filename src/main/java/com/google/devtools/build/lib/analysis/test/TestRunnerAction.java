@@ -60,6 +60,8 @@ import com.google.devtools.build.lib.analysis.test.TestConfiguration.TestOptions
 import com.google.devtools.build.lib.buildeventstream.TestFileNameConstants;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
+import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
+import com.google.devtools.build.lib.collect.nestedset.Order;
 import com.google.devtools.build.lib.events.Event;
 import com.google.devtools.build.lib.server.FailureDetails.Execution.Code;
 import com.google.devtools.build.lib.server.FailureDetails.FailureDetail;
@@ -324,6 +326,43 @@ public class TestRunnerAction extends AbstractAction
             undeclaredOutputsDir.getExecPath(),
             undeclaredOutputsAnnotationsDir,
             baseDir.getRelative("test_attempts"));
+  }
+
+  /**
+   * This action without its inputs and its runfiles, which a test that is not going to run does
+   * not need and which are nearly all of it: the transitive closure of everything the test
+   * depends on at run time.
+   *
+   * <p>What is left reports a result as this action would: its owner, its outputs, its shard and
+   * run, and the properties of the test. It cannot be executed.
+   */
+  public TestRunnerAction withoutInputs() {
+    return new TestRunnerAction(
+        getOwner(),
+        NestedSetBuilder.emptySet(Order.STABLE_ORDER),
+        runfilesTree,
+        testSetupScript,
+        testXmlGeneratorScript,
+        collectCoverageScript,
+        testLog,
+        testXml,
+        cacheStatus,
+        coverageData,
+        coverageDirectory,
+        undeclaredOutputsDir,
+        testProperties,
+        coverageEnv,
+        extraTestEnv,
+        executionSettings.withoutRunfiles(),
+        shardNum,
+        runNumber,
+        configuration,
+        workspaceName,
+        shExecutable,
+        cancelConcurrentTests,
+        splitCoveragePostProcessing,
+        NestedSetBuilder.emptySet(Order.STABLE_ORDER),
+        unrunnableReason);
   }
 
   public boolean allowLocalTests() {
@@ -716,28 +755,15 @@ public class TestRunnerAction extends AbstractAction
   @Override
   public boolean resultRetrieved(
       ActionCachedContext context, Function<Artifact, FileArtifactValue> outputMetadata) {
-    if (!shouldAcceptCachedResult()) {
-      return declined("cached results are not accepted for this test");
-    }
-    Map<String, String> executionInfo = testProperties.getExecutionInfo();
-    if (executionInfo.containsKey(ExecutionRequirements.NO_CACHE)
-        || executionInfo.containsKey(ExecutionRequirements.LOCAL)
-        || executionInfo.containsKey(ExecutionRequirements.NO_REMOTE)
-        || executionInfo.containsKey(ExecutionRequirements.NO_REMOTE_CACHE)) {
-      return declined("the test is tagged not to be cached or not to run remotely");
-    }
-    FileArtifactValue status = outputMetadata.apply(cacheStatus);
-    if (status == null || !status.isInline()) {
-      return declined("the result has no status");
+    String whyNot = whyRetrievedResultIsDeclined(outputMetadata);
+    if (whyNot != null) {
+      return declined(whyNot);
     }
     TestResultData data;
-    try (InputStream in = status.getInputStream()) {
+    try (InputStream in = outputMetadata.apply(cacheStatus).getInputStream()) {
       data = TestResultData.parseFrom(in, ExtensionRegistry.getEmptyRegistry());
     } catch (IOException e) {
       return declined("the status cannot be read");
-    }
-    if (!data.getCachable() || !data.getTestPassed()) {
-      return declined("the test did not pass");
     }
     if (data.hasPassedLog()) {
       // The path of the log in the output base of the build that ran the test. Nothing is there in
@@ -757,6 +783,39 @@ public class TestRunnerAction extends AbstractAction
     }
     cachedTestResultData = Optional.of(data);
     return true;
+  }
+
+  /**
+   * Why {@link #resultRetrieved} would not take a result with this metadata, or null if it would:
+   * for a caller that has to know before it reports anything.
+   */
+  @Nullable
+  public String whyRetrievedResultIsDeclined(
+      Function<Artifact, FileArtifactValue> outputMetadata) {
+    if (!shouldAcceptCachedResult()) {
+      return "cached results are not accepted for this test";
+    }
+    Map<String, String> executionInfo = testProperties.getExecutionInfo();
+    if (executionInfo.containsKey(ExecutionRequirements.NO_CACHE)
+        || executionInfo.containsKey(ExecutionRequirements.LOCAL)
+        || executionInfo.containsKey(ExecutionRequirements.NO_REMOTE)
+        || executionInfo.containsKey(ExecutionRequirements.NO_REMOTE_CACHE)) {
+      return "the test is tagged not to be cached or not to run remotely";
+    }
+    FileArtifactValue status = outputMetadata.apply(cacheStatus);
+    if (status == null || !status.isInline()) {
+      return "the result has no status";
+    }
+    TestResultData data;
+    try (InputStream in = status.getInputStream()) {
+      data = TestResultData.parseFrom(in, ExtensionRegistry.getEmptyRegistry());
+    } catch (IOException e) {
+      return "the status cannot be read";
+    }
+    if (!data.getCachable() || !data.getTestPassed()) {
+      return "the test did not pass";
+    }
+    return null;
   }
 
   private static boolean declined(String why) {

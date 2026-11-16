@@ -544,7 +544,13 @@ public final class CompletionFunction<
   @SuppressWarnings("unchecked") // What is kept for a key is a value of the key's kind.
   private Pair<ValueT, ArtifactsToBuild> builtWithoutItsValue(KeyT key) {
     TopLevelAdmission admission = ExecutionValueCaching.topLevelAdmission();
-    if (admission == null || (key instanceof TargetCompletionKey target && target.willTest())) {
+    if (admission == null) {
+      return null;
+    }
+    // A target that is going to be tested has a stand-in only if its record carries the results
+    // of its tests: see BuildDriverFunction.
+    boolean willTest = key instanceof TargetCompletionKey target && target.willTest();
+    if (willTest && admission.servedTest(key.actionLookupKey()) == null) {
       return null;
     }
     Object standIn = admission.builtValue(key.actionLookupKey());
@@ -554,9 +560,7 @@ public final class CompletionFunction<
     // The record is what says it is built, and is acted on below as for any other.
     return admission.probed(
                     CompletedTopLevelKey.of(
-                        key.actionLookupKey(),
-                        key.topLevelArtifactContext(),
-                        /* willTest= */ false))
+                        key.actionLookupKey(), key.topLevelArtifactContext(), willTest))
                 instanceof SkyValueRetrieverUtils.CompletedProbe probe
             && probe.valid()
         ? Pair.of((ValueT) standIn, ArtifactsToBuild.none())

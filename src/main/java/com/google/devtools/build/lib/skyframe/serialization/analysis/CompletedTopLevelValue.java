@@ -23,16 +23,25 @@ import javax.annotation.Nullable;
  * of what it says: the entry's file dependencies carry the meaning.
  *
  * @param formatVersion to be raised if what an entry promises ever changes
- * @param builtWith for a rule's target that was built and not tested, the key it was built with,
- *     which is the key of its node: enough for a reader to report it as built without fetching
- *     the target. Null for anything else, which a reader fetches.
+ * @param builtWith for a rule's target that was built and not tested, or tested with every result
+ *     in {@code servedTest}, the key it was built with, which is the key of its node: enough for
+ *     a reader to report it as built without fetching the target. Null for anything else, which a
+ *     reader fetches.
+ * @param servedTest for a target whose tests all passed, a {@code ServedTest}: what a reader
+ *     needs of the target to report those results, which are in it. Null for anything else. The
+ *     results have the file dependencies this entry has, so they are valid when it is.
  */
 @AutoCodec
-public record CompletedTopLevelValue(int formatVersion, @Nullable ActionLookupKey builtWith)
+public record CompletedTopLevelValue(
+    int formatVersion, @Nullable ActionLookupKey builtWith, @Nullable Object servedTest)
     implements DeserializedSkyValue {
-  public static final CompletedTopLevelValue INSTANCE = new CompletedTopLevelValue(1, null);
+  public static final CompletedTopLevelValue INSTANCE = new CompletedTopLevelValue(1, null, null);
 
   public static CompletedTopLevelValue builtWith(ActionLookupKey key) {
-    return new CompletedTopLevelValue(1, key);
+    return new CompletedTopLevelValue(1, key, null);
+  }
+
+  public static CompletedTopLevelValue tested(ActionLookupKey key, Object servedTest) {
+    return new CompletedTopLevelValue(1, key, servedTest);
   }
 }

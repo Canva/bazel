@@ -44,6 +44,7 @@ import com.google.devtools.build.lib.analysis.constraints.TopLevelConstraintSema
 import com.google.devtools.build.lib.analysis.constraints.TopLevelConstraintSemantics.EnvironmentCompatibility;
 import com.google.devtools.build.lib.analysis.constraints.TopLevelConstraintSemantics.PlatformCompatibility;
 import com.google.devtools.build.lib.analysis.constraints.TopLevelConstraintSemantics.TargetCompatibilityCheckException;
+import com.google.devtools.build.lib.analysis.test.ServedTest;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.packages.NoSuchTargetException;
@@ -241,7 +242,26 @@ public class BuildDriverFunction implements SkyFunction {
         }
         ActionLookupKey builtWith =
             !willTest && admission.withoutValues() ? probes[0].builtWith() : null;
-        if (builtWith != null) {
+        if (willTest
+            && admission.servedTests()
+            && probes[0].servedTest() instanceof ServedTest served
+            && probes[0].builtWith() != null) {
+          // The record of a target whose tests all passed carries their results and what the
+          // target says about its tests, which is all that reporting them asks of the target.
+          // The target itself is every provider and every action of a test, its runfiles among
+          // them, and is not fetched.
+          ActionLookupKey testedWith = probes[0].builtWith();
+          builtAlready =
+              (SkyValue)
+                  admission.putBuiltValue(
+                      testedWith,
+                      new BuiltTopLevelTargetValue(testedWith, served.provider()),
+                      /* aspect= */ false);
+          admission.putServedTest(testedWith, served);
+          admission.shareProbe(
+              CompletedTopLevelKey.of(testedWith, topLevelArtifactContext, /* willTest= */ true),
+              probes[0]);
+        } else if (builtWith != null) {
           // Nothing reads what a target provides in a build that reports it as built without
           // asking for its artifacts, and that is most of what there is to fetch.
           builtAlready =

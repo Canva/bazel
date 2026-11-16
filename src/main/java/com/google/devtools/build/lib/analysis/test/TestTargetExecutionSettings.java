@@ -88,6 +88,31 @@ public final class TestTargetExecutionSettings {
     this.executionOs = getOsFromConstraintsOrHost(executionPlatform);
   }
 
+  private TestTargetExecutionSettings(TestTargetExecutionSettings from, Runfiles runfiles) {
+    this.testArguments = from.testArguments;
+    this.testFilter = from.testFilter;
+    this.totalShards = from.totalShards;
+    this.totalRuns = from.totalRuns;
+    this.runUnder = from.runUnder;
+    this.runUnderExecutable = from.runUnderExecutable;
+    this.executable = from.executable;
+    this.runfilesSymlinksCreated = from.runfilesSymlinksCreated;
+    this.runfilesDir = from.runfilesDir;
+    this.runfiles = runfiles;
+    this.runfilesInputManifest = from.runfilesInputManifest;
+    this.instrumentedFileManifest = from.instrumentedFileManifest;
+    this.testRunnerFailFast = from.testRunnerFailFast;
+    this.executionOs = from.executionOs;
+  }
+
+  /**
+   * These settings without the runfiles, which are most of them: for a test action that is kept
+   * to report a result and not to run. See {@link TestRunnerAction#withoutInputs}.
+   */
+  TestTargetExecutionSettings withoutRunfiles() {
+    return new TestTargetExecutionSettings(this, Runfiles.EMPTY);
+  }
+
   @Nullable
   private static Artifact getRunUnderExecutable(RuleContext ruleContext) {
     TransitiveInfoCollection runUnderTarget = ruleContext.getRunUnderPrerequisite();
