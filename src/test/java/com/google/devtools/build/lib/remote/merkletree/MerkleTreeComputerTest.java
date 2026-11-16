@@ -36,6 +36,7 @@ import com.google.devtools.build.lib.actions.DelegatingPairInputMetadataProvider
 import com.google.devtools.build.lib.actions.FileArtifactValue;
 import com.google.devtools.build.lib.actions.FilesetOutputTree;
 import com.google.devtools.build.lib.actions.InputMetadataProvider;
+import com.google.devtools.build.lib.actions.MissingDepExecException;
 import com.google.devtools.build.lib.actions.PathMapper;
 import com.google.devtools.build.lib.actions.ResourceSet;
 import com.google.devtools.build.lib.actions.RunfilesArtifactValue;
@@ -74,6 +75,8 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -450,6 +453,73 @@ public class MerkleTreeComputerTest {
   }
 
   @Test
+  public void sourceArtifactMetadata_lookedUpOncePerInput() throws Exception {
+    var sourceRoot = ArtifactRoot.asSourceRoot(Root.fromPath(execRoot));
+    var fakeFileCache = new FakeActionInputFileCache();
+    var files = new ArrayList<Artifact>();
+    // The derived artifact sorts between the source artifacts.
+    for (var execPath : ImmutableList.of("a/source1", "outputs/generated", "src/source2")) {
+      var artifact =
+          ActionsTestUtil.createArtifactWithExecPath(
+              execPath.startsWith("outputs/") ? artifactRoot : sourceRoot,
+              PathFragment.create(execPath));
+      artifact.getPath().getParentDirectory().createDirectoryAndParents();
+      FileSystemUtils.writeContentAsLatin1(artifact.getPath(), "content of " + execPath);
+      fakeFileCache.put(artifact, FileArtifactValue.createForTesting(artifact));
+      files.add(artifact);
+    }
+    var sourceDirectory =
+        ActionsTestUtil.createArtifactWithExecPath(sourceRoot, PathFragment.create("src_dir"));
+    sourceDirectory.getPath().createDirectoryAndParents();
+    FileSystemUtils.writeContentAsLatin1(
+        sourceDirectory.getPath().getChild("file"), "source directory file content");
+    fakeFileCache.put(
+        sourceDirectory, FileArtifactValue.createForTesting(sourceDirectory.getPath()));
+    var spawn = new SpawnBuilder().withInputs(files).withInput(sourceDirectory).build();
+    var countingFileCache = new CountingInputMetadataProvider(fakeFileCache);
+
+    var rootDigest =
+        createMerkleTreeComputer(/* uploader= */ null)
+            .buildForSpawn(
+                spawn,
+                ImmutableSet.of(),
+                /* scrubber= */ null,
+                createSpawnExecutionContext(spawn, countingFileCache),
+                MerkleTreeComputer.BlobPolicy.DISCARD)
+            .digest();
+
+    assertThat(countingFileCache.lookups)
+        .containsExactly(files.get(0), files.get(1), files.get(2), sourceDirectory);
+    var merkleTree =
+        (MerkleTree.Uploadable)
+            createMerkleTreeComputer(/* uploader= */ null)
+                .buildForSpawn(
+                    spawn,
+                    ImmutableSet.of(),
+                    /* scrubber= */ null,
+                    createSpawnExecutionContext(spawn, fakeFileCache),
+                    MerkleTreeComputer.BlobPolicy.KEEP_AND_REUPLOAD);
+    assertThat(rootDigest).isEqualTo(merkleTree.digest());
+    assertThat(merkleTree.inputFiles()).isEqualTo(4);
+    var digestUtil = new DigestUtil(SyscallCache.NO_CACHE, DigestHashFunction.SHA256);
+    for (var file : files) {
+      assertThat(
+              findDirectory(merkleTree, file.getExecPath().getParentDirectory().getPathString())
+                  .getFilesList())
+          .containsExactly(
+              FileNode.newBuilder()
+                  .setName(file.getExecPath().getBaseName())
+                  .setDigest(digestUtil.computeAsUtf8("content of " + file.getExecPathString()))
+                  .setIsExecutable(true)
+                  .build());
+    }
+    assertThat(
+            findDirectory(merkleTree).getDirectoriesList().stream().map(DirectoryNode::getName))
+        .containsExactly("a", "outputs", "src", "src_dir")
+        .inOrder();
+  }
+
+  @Test
   public void duplicateMappedPath_sameDigest_succeeds() throws Exception {
     // Two artifacts from different configurations that map to the same path with identical content.
     var fastbuildRoot =
@@ -724,6 +794,64 @@ public class MerkleTreeComputerTest {
     public void ensureInputsPresent(
         RemoteActionExecutionContext context, MerkleTree.Uploadable merkleTree, boolean force) {
       ensureInputsPresentCount.incrementAndGet();
+    }
+  }
+
+  /** Records the inputs whose metadata is looked up. */
+  private static final class CountingInputMetadataProvider implements InputMetadataProvider {
+    private final InputMetadataProvider delegate;
+    private final List<ActionInput> lookups = new ArrayList<>();
+
+    CountingInputMetadataProvider(InputMetadataProvider delegate) {
+      this.delegate = delegate;
+    }
+
+    @Override
+    @Nullable
+    public synchronized FileArtifactValue getInputMetadataChecked(ActionInput input)
+        throws InterruptedException, IOException, MissingDepExecException {
+      lookups.add(input);
+      return delegate.getInputMetadataChecked(input);
+    }
+
+    @Override
+    @Nullable
+    public TreeArtifactValue getTreeMetadata(ActionInput input) {
+      return delegate.getTreeMetadata(input);
+    }
+
+    @Override
+    @Nullable
+    public TreeArtifactValue getEnclosingTreeMetadata(PathFragment execPath) {
+      return delegate.getEnclosingTreeMetadata(execPath);
+    }
+
+    @Override
+    @Nullable
+    public FilesetOutputTree getFileset(ActionInput input) {
+      return delegate.getFileset(input);
+    }
+
+    @Override
+    public Map<Artifact, FilesetOutputTree> getFilesets() {
+      return delegate.getFilesets();
+    }
+
+    @Override
+    @Nullable
+    public RunfilesArtifactValue getRunfilesMetadata(ActionInput input) {
+      return delegate.getRunfilesMetadata(input);
+    }
+
+    @Override
+    public ImmutableList<RunfilesTree> getRunfilesTrees() {
+      return delegate.getRunfilesTrees();
+    }
+
+    @Override
+    @Nullable
+    public ActionInput getInput(PathFragment execPath) {
+      return delegate.getInput(execPath);
     }
   }
 
