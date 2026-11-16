@@ -106,7 +106,9 @@ public abstract class AbstractConfiguredTarget implements ConfiguredTarget, Visi
   @Override
   public int hashCode() {
     // getLookupKey().hashCode() won't do because MergedConfiguredTarget does not have a lookup key
-    return Objects.hash(getLabel(), getConfigurationKey());
+    // The value Objects.hash gives, without the array it makes for each call: the targets of a
+    // build are put into sets and looked up in them several times over once it is done.
+    return 31 * (31 + Objects.hashCode(getLabel())) + Objects.hashCode(getConfigurationKey());
   }
 
   @Override
