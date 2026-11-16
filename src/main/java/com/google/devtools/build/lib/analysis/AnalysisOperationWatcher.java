@@ -13,10 +13,12 @@
 // limitations under the License.
 package com.google.devtools.build.lib.analysis;
 
+import com.google.common.eventbus.AllowConcurrentEvents;
 import com.google.common.eventbus.EventBus;
 import com.google.common.eventbus.Subscribe;
 import com.google.devtools.build.lib.skyframe.TopLevelStatusEvents.TopLevelEntityAnalysisConcludedEvent;
 import com.google.devtools.build.skyframe.SkyKey;
+import com.google.errorprone.annotations.concurrent.GuardedBy;
 import java.util.Set;
 
 /**
@@ -33,7 +35,10 @@ public class AnalysisOperationWatcher implements AutoCloseable {
   // When there's not more than this amount of top level target/aspect left to analyze, we can start
   // with execution.
   private final float lowerThresholdToSignalForExecution;
-  private boolean signalledExecutionGoAhead = false;
+  private volatile boolean signalledExecutionGoAhead = false;
+
+  @GuardedBy("this")
+  private boolean signalledAnalysisFinished = false;
 
   private AnalysisOperationWatcher(
       Set<SkyKey> threadSafeExpectedKeys,
@@ -66,26 +71,45 @@ public class AnalysisOperationWatcher implements AutoCloseable {
     return watcher;
   }
 
+  /**
+   * Notes that a top-level target or aspect has been analyzed.
+   *
+   * <p>Every thread that analyzes posts this event, once a target, and all but two of the events
+   * of a build have nothing to do here but strike a key off a set made for concurrent use: they
+   * do not take a lock for it, which had those threads queue. The two that have something to
+   * signal do so one at a time, and execution is told to go ahead before analysis is said to be
+   * finished, as when every event waited its turn.
+   */
   @Subscribe
+  @AllowConcurrentEvents
   public void handleTopLevelEntityAnalysisConcluded(TopLevelEntityAnalysisConcludedEvent e) {
     if (threadSafeExpectedKeys.isEmpty()) {
       return;
     }
     threadSafeExpectedKeys.remove(e.getAnalyzedTopLevelKey());
 
-    if (!signalledExecutionGoAhead
-        && threadSafeExpectedKeys.size() <= lowerThresholdToSignalForExecution) {
-      signalledExecutionGoAhead = true;
-      executionGoAheadCallback.goAhead();
+    // Of the threads that strike off the last keys at the same time, the one that reads the size
+    // last reads it after every other has struck its key off, so one of them sees the set empty.
+    int left = threadSafeExpectedKeys.size();
+    if (left > 0 && (signalledExecutionGoAhead || left > lowerThresholdToSignalForExecution)) {
+      return;
     }
 
-    if (threadSafeExpectedKeys.isEmpty()) {
-      try {
-        finisher.analysisFinishedCallback();
-      } catch (InterruptedException exception) {
-        // Subscribers in general shouldn't throw exceptions. We therefore try to preserve the
-        // interrupted status here.
-        Thread.currentThread().interrupt();
+    synchronized (this) {
+      if (!signalledExecutionGoAhead && left <= lowerThresholdToSignalForExecution) {
+        signalledExecutionGoAhead = true;
+        executionGoAheadCallback.goAhead();
+      }
+
+      if (left == 0 && !signalledAnalysisFinished) {
+        signalledAnalysisFinished = true;
+        try {
+          finisher.analysisFinishedCallback();
+        } catch (InterruptedException exception) {
+          // Subscribers in general shouldn't throw exceptions. We therefore try to preserve the
+          // interrupted status here.
+          Thread.currentThread().interrupt();
+        }
       }
     }
   }

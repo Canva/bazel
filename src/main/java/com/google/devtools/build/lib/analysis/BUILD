@@ -353,6 +353,7 @@ java_library(
     deps = [
         "//src/main/java/com/google/devtools/build/lib/skyframe:top_level_status_events",
         "//src/main/java/com/google/devtools/build/skyframe:skyframe-objects",
+        "//third_party:error_prone_annotations",
         "//third_party/java/guava:eventbus",
     ],
 )
