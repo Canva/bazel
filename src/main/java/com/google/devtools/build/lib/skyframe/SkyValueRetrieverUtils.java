@@ -16,6 +16,7 @@ package com.google.devtools.build.lib.skyframe;
 import static com.google.common.base.Preconditions.checkNotNull;
 
 import com.google.common.collect.ImmutableMap;
+import com.google.common.flogger.GoogleLogger;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.SettableFuture;
@@ -51,6 +52,7 @@ import com.google.devtools.build.skyframe.SkyValue;
 import com.google.devtools.build.skyframe.Version;
 import java.util.List;
 import java.util.concurrent.ForkJoinPool;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Supplier;
 import javax.annotation.Nullable;
 
@@ -194,6 +196,10 @@ public final class SkyValueRetrieverUtils {
     return retrieval.result;
   }
 
+  private static final GoogleLogger logger = GoogleLogger.forEnclosingClass();
+
+  private static final AtomicBoolean DETACHED_FAILURE_LOGGED = new AtomicBoolean();
+
   /** Takes a retrieval through its steps, each when the future the last one waited for is done. */
   private static final class DetachedRetrieval implements Runnable, DependOnFutureShim {
     private final SkyKey key;
@@ -249,6 +255,14 @@ public final class SkyValueRetrieverUtils {
           next.addListener(this, ForkJoinPool.commonPool());
         }
       } catch (SerializationException | RuntimeException e) {
+        // As if there were no record, which costs the command time and nothing else. Said once,
+        // because what makes one read fail tends to make all of them fail.
+        if (DETACHED_FAILURE_LOGGED.compareAndSet(false, true)) {
+          logger.atWarning().withCause(e).log(
+              "Reading what the analysis cache has for %s failed; taken as nothing cached. Later"
+                  + " failures of this server are not logged.",
+              key);
+        }
         result.set(new NoCachedData(MissReason.MISS_REASON_UNSPECIFIED));
       } catch (InterruptedException e) {
         Thread.currentThread().interrupt();
