@@ -270,6 +270,9 @@ public final class FrontierSerializer {
                               "; left out %s that depend on changes newer than the version they"
                                   + " would be keyed at",
                               serializationStats.unversionedNodes()))
+                      + String.format(
+                          "; %s markers for paths behind symbolic links",
+                          FileDependencySerializer.takeResolvedPathMarkersWritten())
                       + (serializationStats.nodesAboveAnError() == 0
                           ? ""
                           : String.format(

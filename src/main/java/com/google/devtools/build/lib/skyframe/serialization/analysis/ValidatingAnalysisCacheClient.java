@@ -19,6 +19,8 @@ import static com.google.common.collect.ImmutableSortedMap.toImmutableSortedMap;
 import static com.google.common.util.concurrent.Futures.immediateFailedFuture;
 import static com.google.common.util.concurrent.Futures.immediateFuture;
 import static com.google.common.util.concurrent.MoreExecutors.directExecutor;
+import static com.google.devtools.build.lib.skyframe.serialization.analysis.FileDependencyKeySupport.MAX_KEY_LENGTH;
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.Comparator.naturalOrder;
 
 import com.google.common.collect.ImmutableList;
@@ -51,6 +53,7 @@ import com.google.devtools.build.lib.skyframe.serialization.analysis.proto.MissR
 import com.google.devtools.build.lib.skyframe.serialization.analysis.proto.TopLevelTargetsMatchStatus;
 import com.google.devtools.build.lib.skyframe.serialization.proto.DataType;
 import com.google.devtools.build.lib.util.Bucket;
+import com.google.protobuf.ByteString;
 import com.google.protobuf.CodedInputStream;
 import java.io.IOException;
 import java.util.Arrays;
@@ -90,6 +93,12 @@ import javax.annotation.Nullable;
  * <p>All three are fixed for the lifetime of an instance, so an instance serves one command.
  * Matches are memoized across lookups, which is what makes checking a large graph affordable:
  * entries share most of their dependencies.
+ *
+ * <p>Affordable is still the dependency data of every entry read, most of what a reader with a
+ * few changed files downloads. A store that holds the references between entries can be asked
+ * the question the other way round, once: which entries do these changes reach ({@link
+ * AffectedLookup}). With that answer an entry is a miss if its dependencies are among them and a
+ * hit otherwise, and no dependency data is read at all.
  */
 public final class ValidatingAnalysisCacheClient implements RemoteAnalysisCacheClient {
 
@@ -142,8 +151,42 @@ public final class ValidatingAnalysisCacheClient implements RemoteAnalysisCacheC
         throws ExecutionException, TimeoutException, InterruptedException;
   }
 
+  /**
+   * The dependency entries a reader's changes reach, by the keys they are stored under.
+   *
+   * @param analysis those a change reaches through the files and listings something was analysed
+   *     from. An entry of either kind that depends on one is invalid.
+   * @param contentsOnly those a change reaches only as the contents of a source file. An analysis
+   *     value that depends on one is still valid, and what executing gave is not.
+   */
+  public record AffectedEntries(
+      ImmutableSet<ByteString> analysis, ImmutableSet<ByteString> contentsOnly) {}
+
+  /**
+   * Asks the store which dependency entries some changes reach.
+   *
+   * <p>The future fails if the store cannot say, and entries are then checked against their
+   * dependency data as they are read. An answer has to name every entry a reader would find
+   * matching: an entry it leaves out is used.
+   */
+  @FunctionalInterface
+  public interface AffectedLookup {
+    ListenableFuture<AffectedEntries> lookup(ClientChanges changes);
+  }
+
+  /**
+   * The longest changed path {@link AffectedLookup} is asked about. The entry of a longer one may
+   * be stored under a fingerprint of its key, which a store cannot match to the path: the key is
+   * the path behind a version of up to twelve characters and a delimiter.
+   */
+  private static final int MAX_AFFECTED_PATH_LENGTH = MAX_KEY_LENGTH - 13;
+
   private final FingerprintValueStore store;
   private final FileDependencyDeserializer deserializer;
+  private final Fingerprinter fingerprinter;
+
+  /** Why the {@link AffectedLookup} failed, if it did. */
+  private AtomicReference<String> affectedFailure = new AtomicReference<>();
 
   /** Fails if the changes could not be computed, and then every entry is a miss. */
   private final ListenableFuture<Checker> checker;
@@ -153,11 +196,25 @@ public final class ValidatingAnalysisCacheClient implements RemoteAnalysisCacheC
    *
    * @param noChanges whether the reader's workspace is exactly the writer's, so that nothing it
    *     finds can be invalidated by a change
+   * @param affected the dependency entries the changes reach, if the store said. Entries are then
+   *     checked against this and not against {@code validator}.
    */
-  private record Checker(VersionedChangesValidator validator, boolean noChanges) {
+  private record Checker(
+      VersionedChangesValidator validator, boolean noChanges, @Nullable AffectedEntries affected) {
     private static Checker of(Storage storage, VersionedChanges changes) {
       return new Checker(
-          new VersionedChangesValidator(storage.executor(), changes), changes.isEmpty());
+          new VersionedChangesValidator(storage.executor(), changes),
+          changes.isEmpty(),
+          /* affected= */ null);
+    }
+
+    private Checker withAffected(AffectedEntries affected) {
+      return new Checker(validator, noChanges, affected);
+    }
+
+    /** Whether nothing an entry is read for depends on reading its dependency data first. */
+    private boolean readsNoDependencyData() {
+      return noChanges || affected != null;
     }
   }
 
@@ -254,18 +311,63 @@ public final class ValidatingAnalysisCacheClient implements RemoteAnalysisCacheC
    */
   public static ValidatingAnalysisCacheClient createWithListings(
       Storage storage, int validityHorizon, ListenableFuture<ClientChanges> clientChanges) {
+    return createWithListings(storage, validityHorizon, clientChanges, /* affectedLookup= */ null);
+  }
+
+  /**
+   * As {@link #createWithListings(Storage, int, ListenableFuture)}, asking {@code affectedLookup}
+   * which entries the changes reach if there are any and it is not null.
+   */
+  public static ValidatingAnalysisCacheClient createWithListings(
+      Storage storage,
+      int validityHorizon,
+      ListenableFuture<ClientChanges> clientChanges,
+      @Nullable AffectedLookup affectedLookup) {
     checkArgument(
         validityHorizon >= 0 && validityHorizon < VersionedChanges.CLIENT_CHANGE,
         "validity horizon %s is out of range",
         validityHorizon);
-    return new ValidatingAnalysisCacheClient(
-        storage,
-        Futures.transform(
-            clientChanges,
-            changes ->
-                Checker.of(storage, new VersionedChanges(changes.paths(), changes.listings())),
-            directExecutor()),
-        validityHorizon);
+    var affectedFailure = new AtomicReference<String>();
+    var client =
+        new ValidatingAnalysisCacheClient(
+            storage,
+            Futures.transformAsync(
+                clientChanges,
+                changes -> {
+                  Checker checker =
+                      Checker.of(
+                          storage, new VersionedChanges(changes.paths(), changes.listings()));
+                  if (affectedLookup == null || checker.noChanges() || !canAskAbout(changes)) {
+                    return immediateFuture(checker);
+                  }
+                  return Futures.catching(
+                      Futures.transform(
+                          affectedLookup.lookup(changes), checker::withAffected, directExecutor()),
+                      Exception.class,
+                      e -> {
+                        affectedFailure.set(getRootCause(e).toString());
+                        return checker;
+                      },
+                      directExecutor());
+                },
+                directExecutor()),
+            validityHorizon);
+    client.affectedFailure = affectedFailure;
+    return client;
+  }
+
+  private static boolean canAskAbout(ClientChanges changes) {
+    for (String path : changes.paths()) {
+      if (path.length() > MAX_AFFECTED_PATH_LENGTH) {
+        return false;
+      }
+    }
+    for (String path : changes.listings()) {
+      if (path.length() > MAX_AFFECTED_PATH_LENGTH) {
+        return false;
+      }
+    }
+    return true;
   }
 
   private ValidatingAnalysisCacheClient(
@@ -274,6 +376,7 @@ public final class ValidatingAnalysisCacheClient implements RemoteAnalysisCacheC
     this.deserializer =
         new FileDependencyDeserializer(
             storage.executor(), storage.compressionService(), storage.fingerprinter());
+    this.fingerprinter = storage.fingerprinter();
     this.checker = checker;
     this.validityHorizon = validityHorizon;
   }
@@ -320,7 +423,7 @@ public final class ValidatingAnalysisCacheClient implements RemoteAnalysisCacheC
       // invalidation data and, if it is valid, its value are asked for as they are read. That
       // costs a kept entry two more round trips, and spares a rejected one its whole value.
       valueBytes =
-          !checker.noChanges() && store instanceof UnexpandedReader unexpanded
+          !checker.readsNoDependencyData() && store instanceof UnexpandedReader unexpanded
               ? unexpanded.getUnexpanded(fingerprint)
               : store.get(fingerprint);
     } catch (IOException e) {
@@ -353,6 +456,8 @@ public final class ValidatingAnalysisCacheClient implements RemoteAnalysisCacheC
     // for a reader at the commit that was uploaded is most of what it would otherwise fetch
     // besides the values themselves.
     boolean noChanges = checker.noChanges();
+    // With the entries the changes reach in hand, an entry is checked against those alone.
+    AffectedEntries affected = checker.affected();
     if (value == null || value.length == 0) {
       absent.incrementAndGet();
       return immediateFuture(ABSENT);
@@ -376,23 +481,33 @@ public final class ValidatingAnalysisCacheClient implements RemoteAnalysisCacheC
             String fileKey = codedIn.readString();
             yield noChanges
                 ? immediateFuture(true)
-                : isUnchanged(deserializer.getFileDependencies(fileKey, store), validator);
+                : affected != null
+                    ? isUnaffected(affected, storedKey(fileKey), /* contentsMatter= */ true)
+                    : isUnchanged(deserializer.getFileDependencies(fileKey, store), validator);
           }
           case DATA_TYPE_LISTING -> {
             String listingKey = codedIn.readString();
             yield noChanges
                 ? immediateFuture(true)
-                : isUnchanged(deserializer.getListingDependencies(listingKey, store), validator);
+                : affected != null
+                    ? isUnaffected(affected, storedKey(listingKey), /* contentsMatter= */ true)
+                    : isUnchanged(
+                        deserializer.getListingDependencies(listingKey, store), validator);
           }
           case DATA_TYPE_ANALYSIS_NODE -> {
             PackedFingerprint nested = PackedFingerprint.readFrom(codedIn);
             invalidationFingerprint = nested.toBytes();
             yield noChanges
                 ? immediateFuture(true)
-                : isUnchanged(
-                    deserializer.getNestedDependencies(nested, store),
-                    validator,
-                    /* sourcesMatter= */ false);
+                : affected != null
+                    ? isUnaffected(
+                        affected,
+                        ByteString.copyFrom(invalidationFingerprint),
+                        /* contentsMatter= */ false)
+                    : isUnchanged(
+                        deserializer.getNestedDependencies(nested, store),
+                        validator,
+                        /* sourcesMatter= */ false);
           }
           case DATA_TYPE_EXECUTION_NODE -> {
             if (!ExecutionValueCaching.isEnabled()) {
@@ -406,10 +521,15 @@ public final class ValidatingAnalysisCacheClient implements RemoteAnalysisCacheC
             invalidationFingerprint = nested.toBytes();
             yield noChanges
                 ? immediateFuture(true)
-                : isUnchanged(
-                    deserializer.getNestedDependencies(nested, store),
-                    validator,
-                    /* sourcesMatter= */ true);
+                : affected != null
+                    ? isUnaffected(
+                        affected,
+                        ByteString.copyFrom(invalidationFingerprint),
+                        /* contentsMatter= */ true)
+                    : isUnchanged(
+                        deserializer.getNestedDependencies(nested, store),
+                        validator,
+                        /* sourcesMatter= */ true);
           }
           default -> throw new IOException("unexpected data type " + dataType);
         };
@@ -448,6 +568,57 @@ public final class ValidatingAnalysisCacheClient implements RemoteAnalysisCacheC
               MissReason.MISS_REASON_UNSPECIFIED.getNumber());
         },
         directExecutor());
+  }
+
+  /**
+   * Whether the dependency entry stored under {@code key} is none of those the changes reach.
+   *
+   * @param contentsMatter whether a change that reaches it only as the contents of a source file
+   *     counts, which it does for everything but an analysis value
+   */
+  private ListenableFuture<Boolean> isUnaffected(
+      AffectedEntries affected, ByteString key, boolean contentsMatter) {
+    if (affected.analysis().contains(key)) {
+      countReason("AffectedAnalysis");
+      return immediateFuture(false);
+    }
+    if (contentsMatter && affected.contentsOnly().contains(key)) {
+      countReason("AffectedContents");
+      return immediateFuture(false);
+    }
+    return immediateFuture(true);
+  }
+
+  /** The key the entry of a file or a listing is stored under, as its writer derived it. */
+  private ByteString storedKey(String cacheKey) {
+    byte[] bytes = cacheKey.getBytes(UTF_8);
+    return cacheKey.length() > MAX_KEY_LENGTH
+        ? ByteString.copyFrom(fingerprinter.fingerprint(bytes).toBytes())
+        : ByteString.copyFrom(bytes);
+  }
+
+  /**
+   * Returns how many entries the store said the changes reach, or why it did not say. Null before
+   * the changes are known, and if the store was not asked.
+   */
+  @Nullable
+  public String getAffectedSummary() {
+    if (!checker.isDone()) {
+      return null;
+    }
+    Checker done;
+    try {
+      done = Futures.getDone(checker);
+    } catch (ExecutionException | RuntimeException e) {
+      return null;
+    }
+    if (done.affected() != null) {
+      return String.format(
+          "%d dependency entries reached by the changes, %d more by source contents only",
+          done.affected().analysis().size(), done.affected().contentsOnly().size());
+    }
+    String failure = affectedFailure.get();
+    return failure == null ? null : "not asked for or not answered: " + failure;
   }
 
   private ListenableFuture<Boolean> isUnchanged(

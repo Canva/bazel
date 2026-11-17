@@ -387,6 +387,7 @@ java_library(
     deps = [
         ":execution_value_caching",
         ":file_dependency_deserializer",
+        ":file_dependency_key_support",
         ":lookup_result",
         ":lookup_result_impl",
         ":remote_analysis_cache_client",

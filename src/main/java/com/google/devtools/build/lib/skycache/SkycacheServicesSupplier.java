@@ -18,6 +18,8 @@ import static com.google.common.util.concurrent.Futures.immediateFuture;
 import static java.util.concurrent.ForkJoinPool.commonPool;
 import static java.util.stream.Collectors.joining;
 
+import build.aspect.skycache.v1.AffectedRequest;
+import build.aspect.skycache.v1.AffectedResponse;
 import build.aspect.skycache.v1.AnalysisCacheGrpc;
 import build.aspect.skycache.v1.AnalysisCacheGrpc.AnalysisCacheFutureStub;
 import build.aspect.skycache.v1.AnalysisCacheGrpc.AnalysisCacheStub;
@@ -27,6 +29,7 @@ import com.google.auth.Credentials;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.util.concurrent.ListenableFuture;
+import com.google.common.util.concurrent.SettableFuture;
 import com.google.devtools.build.lib.authandtls.AuthAndTLSOptions;
 import com.google.devtools.build.lib.authandtls.GoogleAuthUtils;
 import com.google.devtools.build.lib.concurrent.safeexecutor.SafeExecutor;
@@ -48,8 +51,10 @@ import com.google.devtools.build.lib.skyframe.serialization.analysis.RemoteAnaly
 import com.google.devtools.build.lib.skyframe.serialization.analysis.ValidatingAnalysisCacheClient;
 import com.google.devtools.build.lib.util.SerializedAbruptExitException;
 import com.google.devtools.common.options.OptionsProvider;
+import com.google.protobuf.ByteString;
 import io.grpc.CallCredentials;
 import io.grpc.ManagedChannel;
+import io.grpc.stub.StreamObserver;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -57,6 +62,7 @@ import java.util.List;
 import java.time.Clock;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import javax.annotation.Nullable;
 
 /**
@@ -141,6 +147,9 @@ final class SkycacheServicesSupplier implements RemoteAnalysisCachingServicesSup
   @Nullable private SkycacheMetadata metadata;
 
   @Nullable private ValidatingAnalysisCacheClient validatingClient;
+
+  /** Asks the service which entries a reader's changes reach, if this command is to. */
+  @Nullable private ValidatingAnalysisCacheClient.AffectedLookup affectedLookup;
   @Nullable private String validationSummaryAtShutdown;
   @Nullable private String localStoreFailure;
 
@@ -221,7 +230,8 @@ final class SkycacheServicesSupplier implements RemoteAnalysisCachingServicesSup
                 cachingOptions,
                 servicesOptions,
                 mirrorOptions == null ? ImmutableList.of() : mirrorOptions.getMirrors(),
-                fetchOptions == null || fetchOptions.getFetchClosures());
+                fetchOptions == null || fetchOptions.getFetchClosures(),
+                fetchOptions != null && fetchOptions.getAskAffected() && localPath.isEmpty());
     if (!localPath.isEmpty()) {
       try {
         local = LocalAnalysisStore.open(Path.of(localPath), localOptions.getLocalMaxSize());
@@ -265,7 +275,8 @@ final class SkycacheServicesSupplier implements RemoteAnalysisCachingServicesSup
       RemoteAnalysisCachingOptions cachingOptions,
       RemoteAnalysisCachingServicesOptions servicesOptions,
       List<String> mirrorTargets,
-      boolean fetchClosures)
+      boolean fetchClosures,
+      boolean askAffected)
       throws SerializedAbruptExitException {
     if (authAndTlsOptions == null) {
       throw abruptExit(
@@ -324,6 +335,17 @@ final class SkycacheServicesSupplier implements RemoteAnalysisCachingServicesSup
                 PUT_LINGER_MILLIS,
                 deadlineMillis,
                 scheduler));
+    if (askAffected) {
+      // Not with a local store in front: the service knows nothing of what that holds.
+      AnalysisCacheStub affectedStub = AnalysisCacheGrpc.newStub(channel);
+      if (callCredentials != null) {
+        affectedStub = affectedStub.withCallCredentials(callCredentials);
+      }
+      AnalysisCacheStub stubForAffected = affectedStub;
+      // Longer than a read: the walk of a change that reaches most of an upload takes seconds.
+      long affectedDeadlineMillis = Math.max(deadlineMillis, AFFECTED_MIN_DEADLINE_MILLIS);
+      affectedLookup = changes -> askAffected(stubForAffected, affectedDeadlineMillis, changes);
+    }
     // Strips headers without checking them; replaced when the command is git-versioned.
     client = new GrpcAnalysisCacheClient(gets);
     SnapshotIndex index = SnapshotIndex.of(snapshotStub);
@@ -358,6 +380,44 @@ final class SkycacheServicesSupplier implements RemoteAnalysisCachingServicesSup
     this.mirrors = mirrors.build();
     remoteStore = new MirroredFingerprintValueStore(grpcStore, this.mirrors);
     return SnapshotIndex.mirrored(index, this.mirrors);
+  }
+
+  private static final long AFFECTED_MIN_DEADLINE_MILLIS = 120_000;
+
+  /** Collects the service's answer to which entries {@code changes} reach. */
+  private static ListenableFuture<ValidatingAnalysisCacheClient.AffectedEntries> askAffected(
+      AnalysisCacheStub stub,
+      long deadlineMillis,
+      ValidatingAnalysisCacheClient.ClientChanges changes) {
+    SettableFuture<ValidatingAnalysisCacheClient.AffectedEntries> result = SettableFuture.create();
+    var analysis = ImmutableSet.<ByteString>builder();
+    var contentsOnly = ImmutableSet.<ByteString>builder();
+    stub.withDeadlineAfter(deadlineMillis, TimeUnit.MILLISECONDS)
+        .affected(
+            AffectedRequest.newBuilder()
+                .addAllFiles(changes.paths())
+                .addAllListings(changes.listings())
+                .build(),
+            new StreamObserver<AffectedResponse>() {
+              @Override
+              public void onNext(AffectedResponse response) {
+                analysis.addAll(response.getKeysList());
+                contentsOnly.addAll(response.getContentsOnlyKeysList());
+              }
+
+              @Override
+              public void onError(Throwable t) {
+                result.setException(t);
+              }
+
+              @Override
+              public void onCompleted() {
+                result.set(
+                    new ValidatingAnalysisCacheClient.AffectedEntries(
+                        analysis.build(), contentsOnly.build()));
+              }
+            });
+    return result;
   }
 
   /**
@@ -397,7 +457,8 @@ final class SkycacheServicesSupplier implements RemoteAnalysisCachingServicesSup
                 validation.compressionService(),
                 validation.fingerprinter()),
             validation.validityHorizon(),
-            validation.clientChanges());
+            validation.clientChanges(),
+            affectedLookup);
     validatingClient.setTopLevelTargetsLookup(snapshotIndex);
     ReadQueue reads = gets;
     if (reads != null) {
@@ -521,6 +582,7 @@ final class SkycacheServicesSupplier implements RemoteAnalysisCachingServicesSup
         stats.absent(),
         stats.invalidated(),
         reasons.isEmpty() ? "" : " (" + reasons + ")")
+        + (client.getAffectedSummary() == null ? "" : "; " + client.getAffectedSummary())
         + (client.getFirstMissingData() == null
             ? ""
             : "; first failure: " + client.getFirstMissingData())
@@ -621,6 +683,7 @@ final class SkycacheServicesSupplier implements RemoteAnalysisCachingServicesSup
     mirrors = ImmutableList.of();
     remoteStore = null;
     client = null;
+    affectedLookup = null;
     validation = null;
     base = null;
     changes = immediateFuture(ImmutableSet.of());

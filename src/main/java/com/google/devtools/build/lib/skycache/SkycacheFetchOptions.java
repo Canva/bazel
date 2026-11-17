@@ -37,6 +37,21 @@ public abstract class SkycacheFetchOptions extends OptionsBase {
   public abstract boolean getFetchClosures();
 
   @Option(
+      name = "canva_skycache_ask_affected",
+      defaultValue = "false",
+      documentationCategory = OptionDocumentationCategory.UNDOCUMENTED,
+      effectTags = {OptionEffectTag.BAZEL_INTERNAL_CONFIGURATION},
+      help =
+          "A reader whose workspace differs from what was uploaded asks the service of"
+              + " --experimental_remote_analysis_cache once which entries its changes reach, and"
+              + " takes every other entry as valid without reading its dependency data, which is"
+              + " otherwise most of what such a reader downloads. Only for a service whose store"
+              + " was written entirely by writers that record the paths entries resolve to;"
+              + " against one that cannot answer, entries are checked as they are read."
+              + " Experimental.")
+  public abstract boolean getAskAffected();
+
+  @Option(
       name = "canva_skycache_execution_values",
       defaultValue = "false",
       documentationCategory = OptionDocumentationCategory.UNDOCUMENTED,

@@ -39,6 +39,17 @@ final class FileDependencyKeySupport {
 
   static final byte DIRECTORY_KEY_DELIMITER = (byte) ';';
 
+  /**
+   * First byte of the key of a marker: an entry with no contents that stands for a path another
+   * entry resolves to, through symbolic links, and is not keyed by.
+   *
+   * <p>A reader matches a change against the paths an entry resolves to. A store asked which
+   * entries a change reaches knows keys and the references between entries, so the writer gives
+   * each such path a marker keyed by it and has the entry reference the marker. The byte is not
+   * one of Base64 and is neither delimiter, so no key of invalidation data starts with it.
+   */
+  static final byte MARKER_PREFIX = (byte) '~';
+
   private static final Base64.Encoder ENCODER = Base64.getEncoder().withoutPadding();
 
   static byte[] encodeMtsv(long mtsv) {
@@ -64,6 +75,19 @@ final class FileDependencyKeySupport {
 
     // encodedMtsv is Base64-encoded and thus always ASCII-only, which means that it doesn't require
     // any reencoding to match the internal string encoding (see StringEncoding for details).
+    return StringUnsafe.newInstance(keyBytes, StringUnsafe.LATIN1);
+  }
+
+  /**
+   * Returns the key of the marker of {@code path}: {@link #MARKER_PREFIX}, the delimiter of the
+   * kind of entry that resolves to the path, and the path.
+   */
+  static String computeMarkerKey(String path, byte delimiter) {
+    byte[] pathBytes = StringUnsafe.getInternalStringBytes(path);
+    byte[] keyBytes = new byte[2 + pathBytes.length];
+    keyBytes[0] = MARKER_PREFIX;
+    keyBytes[1] = delimiter;
+    System.arraycopy(pathBytes, 0, keyBytes, 2, pathBytes.length);
     return StringUnsafe.newInstance(keyBytes, StringUnsafe.LATIN1);
   }
 

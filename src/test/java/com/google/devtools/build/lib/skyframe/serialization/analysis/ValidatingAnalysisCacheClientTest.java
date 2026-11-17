@@ -14,7 +14,9 @@
 package com.google.devtools.build.lib.skyframe.serialization.analysis;
 
 import static com.google.common.truth.Truth.assertThat;
+import static com.google.common.truth.Truth.assertWithMessage;
 import static com.google.common.util.concurrent.Futures.immediateFailedFuture;
+import static com.google.common.util.concurrent.Futures.immediateFuture;
 import static com.google.devtools.build.lib.actions.FileStateValue.NONEXISTENT_FILE_STATE_NODE;
 import static com.google.devtools.build.lib.skyframe.serialization.proto.DataType.DATA_TYPE_ANALYSIS_NODE;
 import static com.google.devtools.build.lib.skyframe.serialization.proto.DataType.DATA_TYPE_EMPTY;
@@ -39,7 +41,11 @@ import com.google.devtools.build.lib.compress.CompressionServiceImpl;
 import com.google.devtools.build.lib.concurrent.safeexecutor.SafeExecutorOwner;
 import com.google.devtools.build.lib.skyframe.serialization.FingerprintValueService;
 import com.google.devtools.build.lib.skyframe.serialization.InMemoryFingerprintValueStore;
+import com.google.devtools.build.lib.skyframe.serialization.KeyBytesProvider;
 import com.google.devtools.build.lib.skyframe.serialization.PackedFingerprint;
+import com.google.devtools.build.lib.skyframe.serialization.References;
+import com.google.devtools.build.lib.skyframe.serialization.ReferencingWriter;
+import com.google.devtools.build.lib.skyframe.serialization.WriteStatus;
 import com.google.devtools.build.lib.skyframe.serialization.analysis.proto.MissReason;
 import com.google.devtools.build.lib.skyframe.serialization.analysis.FileDependencySerializer.RepositoryBoundary;
 import com.google.devtools.build.lib.skyframe.serialization.analysis.InvalidationDataInfoOrFuture.FileDataInfo;
@@ -54,6 +60,8 @@ import com.google.devtools.build.lib.skyframe.serialization.analysis.Invalidatio
 import com.google.devtools.build.lib.skyframe.serialization.analysis.InvalidationDataInfoOrFuture.NodeDataInfo;
 import com.google.devtools.build.lib.skyframe.serialization.analysis.InvalidationDataInfoOrFuture.NodeDataInfoOrFuture;
 import com.google.devtools.build.lib.skyframe.serialization.analysis.InvalidationDataInfoOrFuture.NodeInvalidationDataInfo;
+import com.google.devtools.build.lib.skyframe.serialization.analysis.ValidatingAnalysisCacheClient.AffectedEntries;
+import com.google.devtools.build.lib.skyframe.serialization.analysis.ValidatingAnalysisCacheClient.ClientChanges;
 import com.google.devtools.build.lib.skyframe.serialization.analysis.ValidatingAnalysisCacheClient.DepotChange;
 import com.google.devtools.build.lib.skyframe.serialization.analysis.ValidatingAnalysisCacheClient.ValidationStats;
 import com.google.devtools.build.lib.skyframe.serialization.analysis.proto.TopLevelTargetsMatchStatus;
@@ -77,7 +85,16 @@ import com.google.protobuf.ByteString;
 import com.google.protobuf.CodedOutputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
+import javax.annotation.Nullable;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
@@ -98,7 +115,7 @@ public final class ValidatingAnalysisCacheClientTest {
   private final Path externalRoot = fs.getPath("/ob/external");
 
   private final InMemoryGraph graph = InMemoryGraph.create();
-  private final InMemoryFingerprintValueStore store = new InMemoryFingerprintValueStore();
+  private final ReferenceRecordingStore store = new ReferenceRecordingStore();
   private final FingerprintValueService service = FingerprintValueService.createForTesting(store);
   private final SafeExecutorOwner executor = new SafeExecutorOwner(newDirectExecutorService());
   private final ValidatingAnalysisCacheClient.Storage storage =
@@ -309,6 +326,225 @@ public final class ValidatingAnalysisCacheClientTest {
   }
 
   @Test
+  public void affected_entriesNamedAreMisses_andNoDependencyDataIsRead() throws Exception {
+    // None of these has dependency data in the store: reading it would make each a miss.
+    PackedFingerprint reached = PackedFingerprint.getFingerprintForTesting("reached");
+    PackedFingerprint reachedByContents = PackedFingerprint.getFingerprintForTesting("by contents");
+    PackedFingerprint notReached = PackedFingerprint.getFingerprintForTesting("not reached");
+    ByteString file = putEntry(DATA_TYPE_FILE, "AQ:pkg/BUILD");
+    ByteString otherFile = putEntry(DATA_TYPE_FILE, "AQ:other/BUILD");
+    ByteString listing = putEntry(DATA_TYPE_LISTING, "AQ;pkg");
+    ByteString analysis = putEntry(DATA_TYPE_ANALYSIS_NODE, reached);
+    ByteString execution = putEntry(DATA_TYPE_EXECUTION_NODE, reached);
+    ByteString analysisOverSource = putEntry(DATA_TYPE_ANALYSIS_NODE, reachedByContents);
+    ByteString executionOverSource = putEntry(DATA_TYPE_EXECUTION_NODE, reachedByContents);
+    ByteString untouched = putEntry(DATA_TYPE_EXECUTION_NODE, notReached);
+    var asked = new AtomicInteger();
+    var affected =
+        new AffectedEntries(
+            ImmutableSet.of(
+                ByteString.copyFromUtf8("AQ:pkg/BUILD"),
+                ByteString.copyFromUtf8("AQ;pkg"),
+                ByteString.copyFrom(reached.toBytes())),
+            ImmutableSet.of(ByteString.copyFrom(reachedByContents.toBytes())));
+    var client =
+        ValidatingAnalysisCacheClient.createWithListings(
+            storage,
+            WRITER_VERSION,
+            immediateFuture(
+                new ClientChanges(ImmutableSet.of("pkg/BUILD", "pkg/main.cc"), ImmutableSet.of())),
+            changes -> {
+              asked.incrementAndGet();
+              return immediateFuture(affected);
+            });
+
+    assertThat(lookup(client, file)).isEmpty();
+    assertThat(lookup(client, listing)).isEmpty();
+    assertThat(lookup(client, analysis)).isEmpty();
+    assertThat(lookup(client, execution)).isEmpty();
+    // Only the contents of a source file below it changed, which analysis does not read.
+    assertThat(lookup(client, analysisOverSource)).isEqualTo(ByteString.copyFrom(VALUE));
+    assertThat(lookup(client, executionOverSource)).isEmpty();
+    assertThat(lookup(client, otherFile)).isEqualTo(ByteString.copyFrom(VALUE));
+    assertThat(lookup(client, untouched)).isEqualTo(ByteString.copyFrom(VALUE));
+    assertThat(client.getValidationStats()).isEqualTo(new ValidationStats(3, 0, 5));
+    assertThat(asked.get()).isEqualTo(1);
+    assertThat(client.getAffectedSummary()).contains("3 dependency entries reached");
+  }
+
+  @Test
+  public void affected_storeCannotSay_entriesAreCheckedAgainstTheirDependencies() throws Exception {
+    FileKey build = workspaceFile("pkg/BUILD", 90);
+    ByteString entry = putEntry(DATA_TYPE_FILE, fileInfo(build).cacheKey());
+    ByteString dangling = putEntry(DATA_TYPE_FILE, "nonexistent key");
+    var client =
+        ValidatingAnalysisCacheClient.createWithListings(
+            storage,
+            WRITER_VERSION,
+            immediateFuture(new ClientChanges(ImmutableSet.of("other/BUILD"), ImmutableSet.of())),
+            changes -> immediateFailedFuture(new IOException("UNIMPLEMENTED")));
+
+    assertThat(lookup(client, entry)).isEqualTo(ByteString.copyFrom(VALUE));
+    // Its dependency data was read, and is not there.
+    assertThat(lookup(client, dangling)).isEmpty();
+    assertThat(client.getAffectedSummary()).contains("UNIMPLEMENTED");
+  }
+
+  @Test
+  public void affected_notAskedWithoutChanges_orAboutAPathTooLongToBeAKey() throws Exception {
+    ByteString dangling = putEntry(DATA_TYPE_FILE, "nonexistent key");
+    var asked = new AtomicInteger();
+    ValidatingAnalysisCacheClient.AffectedLookup lookup =
+        changes -> {
+          asked.incrementAndGet();
+          return immediateFuture(new AffectedEntries(ImmutableSet.of(), ImmutableSet.of()));
+        };
+
+    var unchanged =
+        ValidatingAnalysisCacheClient.createWithListings(
+            storage,
+            WRITER_VERSION,
+            immediateFuture(new ClientChanges(ImmutableSet.of(), ImmutableSet.of())),
+            lookup);
+    assertThat(lookup(unchanged, dangling)).isEqualTo(ByteString.copyFrom(VALUE));
+    assertThat(asked.get()).isEqualTo(0);
+
+    // The entry of such a path is stored under a fingerprint, which a store cannot match to it.
+    var longPath =
+        ValidatingAnalysisCacheClient.createWithListings(
+            storage,
+            WRITER_VERSION,
+            immediateFuture(
+                new ClientChanges(ImmutableSet.of("d/" + "x".repeat(240)), ImmutableSet.of())),
+            lookup);
+    assertThat(lookup(longPath, dangling)).isEmpty();
+    assertThat(asked.get()).isEqualTo(0);
+  }
+
+  /**
+   * What the writer records has to be enough for a store to answer as a reader would: for every
+   * change, each entry the reader finds invalid from its dependency data is one the store's walk
+   * of the references reaches. Paths reached through symbolic links are where the two could part,
+   * since an entry is keyed by the path as written and matched by the paths it resolves to.
+   */
+  @Test
+  public void affected_storeWalkReachesWhatDependencyDataInvalidates_throughLinks()
+      throws Exception {
+    // real/a.txt, a directory link -> real, and a file pkg/alias.txt -> ../real/a.txt.
+    FileKey realFile = workspaceFile("real/a.txt", 50);
+    RootedPath realFilePath = realFile.argument();
+    RootedPath realDir = RootedPath.toRootedPath(workspaceRoot, workspace.getRelative("real"));
+    inject(realDir, FileStateValue.create(realDir, SyscallCache.NO_CACHE, /* tsgm= */ null));
+    inject(
+        realFilePath, FileStateValue.create(realFilePath, SyscallCache.NO_CACHE, /* tsgm= */ null));
+    RootedPath link = RootedPath.toRootedPath(workspaceRoot, workspace.getRelative("link"));
+    inject(
+        FileKey.create(link),
+        new FileValue.SymlinkFileValueWithoutStoredChain(
+            realDir,
+            FileStateValue.create(realDir, SyscallCache.NO_CACHE, /* tsgm= */ null),
+            PathFragment.create("real")));
+    FileKey throughLink =
+        FileKey.create(
+            RootedPath.toRootedPath(workspaceRoot, workspace.getRelative("link/a.txt")));
+    inject(
+        throughLink,
+        new FileValue.DifferentRealPathFileValueWithoutStoredChain(
+            realFilePath,
+            FileStateValue.create(realFilePath, SyscallCache.NO_CACHE, /* tsgm= */ null)));
+    FileKey build = workspaceFile("pkg/BUILD", 60);
+    FileKey defs = workspaceFile("pkg/defs.bzl", 60);
+    FileKey alias =
+        FileKey.create(
+            RootedPath.toRootedPath(workspaceRoot, workspace.getRelative("pkg/alias.txt")));
+    inject(
+        alias,
+        new FileValue.SymlinkFileValueWithoutStoredChain(
+            realFilePath,
+            FileStateValue.create(realFilePath, SyscallCache.NO_CACHE, /* tsgm= */ null),
+            PathFragment.create("../real/a.txt")));
+
+    var sourceThroughLink =
+        (AbstractNestedFileOpNodes)
+            AbstractNestedFileOpNodes.from(ImmutableSet.<FileOpNode>of(build, defs), throughLink);
+    var analysedThroughLink =
+        (AbstractNestedFileOpNodes)
+            AbstractNestedFileOpNodes.from(ImmutableSet.<FileOpNode>of(build, throughLink));
+    ImmutableList<ByteString> entries =
+        ImmutableList.of(
+            putEntry(DATA_TYPE_FILE, fileInfo(throughLink).cacheKey()),
+            putEntry(DATA_TYPE_LISTING, listingInfo(DirectoryListingKey.create(link)).cacheKey()),
+            putEntry(DATA_TYPE_FILE, fileInfo(alias).cacheKey()),
+            putEntry(DATA_TYPE_ANALYSIS_NODE, nodeInfo(sourceThroughLink).cacheKey()),
+            putEntry(DATA_TYPE_EXECUTION_NODE, nodeInfo(sourceThroughLink).cacheKey()),
+            putEntry(DATA_TYPE_ANALYSIS_NODE, nodeInfo(analysedThroughLink).cacheKey()),
+            putEntry(DATA_TYPE_FILE, fileInfo(build).cacheKey()));
+    // The markers of the paths behind the links.
+    assertThat(store.keys())
+        .containsAtLeast(
+            ByteString.copyFromUtf8("~:real/a.txt"),
+            ByteString.copyFromUtf8("~:real"),
+            ByteString.copyFromUtf8("~;real"));
+
+    ImmutableList<ClientChanges> changes =
+        ImmutableList.of(
+            new ClientChanges(ImmutableSet.of("real/a.txt"), ImmutableSet.of()),
+            new ClientChanges(ImmutableSet.of("real"), ImmutableSet.of()),
+            new ClientChanges(ImmutableSet.of("real/new.txt"), ImmutableSet.of("real")),
+            new ClientChanges(ImmutableSet.of("link"), ImmutableSet.of("")),
+            new ClientChanges(ImmutableSet.of("link/a.txt"), ImmutableSet.of("link")),
+            new ClientChanges(ImmutableSet.of("pkg/alias.txt"), ImmutableSet.of()),
+            new ClientChanges(ImmutableSet.of("pkg/BUILD"), ImmutableSet.of()),
+            new ClientChanges(ImmutableSet.of("pkg"), ImmutableSet.of()),
+            new ClientChanges(ImmutableSet.of("other/x.txt"), ImmutableSet.of("other")));
+    var invalidByDependencyData = new ArrayList<List<Boolean>>();
+    for (ClientChanges change : changes) {
+      var fromDependencyData = new ArrayList<Boolean>();
+      var fromStoreWalk = new ArrayList<Boolean>();
+      for (ByteString entry : entries) {
+        fromDependencyData.add(
+            lookup(
+                    ValidatingAnalysisCacheClient.createWithListings(
+                        storage, WRITER_VERSION, immediateFuture(change)),
+                    entry)
+                .isEmpty());
+        fromStoreWalk.add(
+            lookup(
+                    ValidatingAnalysisCacheClient.createWithListings(
+                        storage,
+                        WRITER_VERSION,
+                        immediateFuture(change),
+                        asked -> immediateFuture(store.walkFrom(asked))),
+                    entry)
+                .isEmpty());
+      }
+      for (int i = 0; i < entries.size(); i++) {
+        if (fromDependencyData.get(i)) {
+          assertWithMessage("entry %s after %s", i, change).that(fromStoreWalk.get(i)).isTrue();
+        }
+      }
+      invalidByDependencyData.add(fromDependencyData);
+      // The walk may reach more, by the path of a key that a reader would not match. For the
+      // paths behind the links it reaches exactly as much.
+      if (change.paths().contains("real/a.txt")
+          || change.paths().contains("real/new.txt")
+          || change.paths().contains("pkg/BUILD")
+          || change.paths().contains("other/x.txt")) {
+        assertWithMessage("after %s", change).that(fromStoreWalk).isEqualTo(fromDependencyData);
+      }
+    }
+    // The file behind the link: everything that reads it through either link, and not the
+    // analysis value that has it only as a source, nor the listing, nor the BUILD file.
+    assertThat(invalidByDependencyData.get(0))
+        .containsExactly(true, false, true, false, true, true, false)
+        .inOrder();
+    // A file added behind the link changes the listing read through it and nothing else.
+    assertThat(invalidByDependencyData.get(2))
+        .containsExactly(false, true, false, false, false, false, false)
+        .inOrder();
+  }
+
+  @Test
   public void externalRepository_resolvesThroughTheSyntheticEntries() throws Exception {
     // Every record the serializer writes at the repository boundary has to be readable back, or
     // the reader sees missing data and nothing that touches a repository ever hits.
@@ -501,6 +737,118 @@ public final class ValidatingAnalysisCacheClientTest {
     entry.addReverseDepAndCheckIfDone(null);
     entry.markRebuilding();
     entry.setValue(value, Version.minimal(), /* maxTransitiveSourceVersion= */ null);
+  }
+
+  /**
+   * Keeps the references entries are written with, and walks them as the analysis cache service
+   * does to name the entries a change reaches.
+   */
+  private static final class ReferenceRecordingStore extends InMemoryFingerprintValueStore
+      implements ReferencingWriter {
+    private final ConcurrentHashMap<ByteString, byte[]> references = new ConcurrentHashMap<>();
+
+    @Override
+    public WriteStatus put(
+        KeyBytesProvider key, byte[] serializedBytes, @Nullable byte[] references) {
+      if (references != null) {
+        this.references.put(ByteString.copyFrom(key.toBytes()), references);
+      }
+      return put(key, serializedBytes);
+    }
+
+    private record Referrer(ByteString key, boolean contents) {}
+
+    /**
+     * From the entries and markers of the changed paths to everything that references them,
+     * noting what is reached only across a reference after a separator.
+     */
+    AffectedEntries walkFrom(ClientChanges changes) {
+      var referrers = new HashMap<Long, List<Referrer>>();
+      references.forEach(
+          (key, packed) -> {
+            // Only through dependency entries: those of files and listings, and the sets of
+            // dependencies, which all have a separator.
+            if (dependencyPath(key) == null && !hasSeparator(packed)) {
+              return;
+            }
+            ByteBuffer buffer = ByteBuffer.wrap(packed).order(ByteOrder.LITTLE_ENDIAN);
+            boolean contents = false;
+            while (buffer.remaining() >= References.BYTES) {
+              long hash = buffer.getLong();
+              if (hash == References.CONTENTS_SEPARATOR) {
+                contents = true;
+              } else {
+                referrers
+                    .computeIfAbsent(hash, unused -> new ArrayList<>())
+                    .add(new Referrer(key, contents));
+              }
+            }
+          });
+      var reached = new HashSet<ByteString>();
+      var inFull = new HashSet<ByteString>();
+      var frontier = new ArrayDeque<Referrer>();
+      for (ByteString key : keys()) {
+        String path = dependencyPath(key);
+        if (path != null
+            && (path.charAt(0) == ':'
+                ? changes.paths().contains(path.substring(1))
+                : changes.listings().contains(path.substring(1)))) {
+          reached.add(key);
+          inFull.add(key);
+          frontier.add(new Referrer(key, /* contents= */ false));
+        }
+      }
+      while (!frontier.isEmpty()) {
+        Referrer at = frontier.remove();
+        byte[] key = at.key().toByteArray();
+        for (Referrer referrer :
+            referrers.getOrDefault(References.hash(key, 0, key.length), ImmutableList.of())) {
+          boolean contents = at.contents() || referrer.contents();
+          if (contents ? reached.add(referrer.key()) : inFull.add(referrer.key())) {
+            reached.add(referrer.key());
+            frontier.add(new Referrer(referrer.key(), contents));
+          }
+        }
+      }
+      var analysis = ImmutableSet.<ByteString>builder();
+      var contentsOnly = ImmutableSet.<ByteString>builder();
+      for (ByteString key : reached) {
+        if (key.byteAt(0) == '~') {
+          continue; // A marker.
+        }
+        (inFull.contains(key) ? analysis : contentsOnly).add(key);
+      }
+      return new AffectedEntries(analysis.build(), contentsOnly.build());
+    }
+
+    private static boolean hasSeparator(byte[] packed) {
+      ByteBuffer buffer = ByteBuffer.wrap(packed).order(ByteOrder.LITTLE_ENDIAN);
+      while (buffer.remaining() >= References.BYTES) {
+        if (buffer.getLong() == References.CONTENTS_SEPARATOR) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    /** The key from its delimiter on, if it is that of a file, a listing or a marker. */
+    @Nullable
+    private static String dependencyPath(ByteString key) {
+      String text = key.toStringUtf8();
+      if (text.startsWith("~:") || text.startsWith("~;")) {
+        return text.substring(1);
+      }
+      for (int i = 0; i < text.length() && i <= 12; i++) {
+        char c = text.charAt(i);
+        if (c == ':' || c == ';') {
+          return text.substring(i);
+        }
+        if (!(Character.isLetterOrDigit(c) && c < 128) && c != '+' && c != '/') {
+          return null;
+        }
+      }
+      return null;
+    }
   }
 
   /** Versions from {@link #versions}, defaulting to {@link LongVersionGetter#MINIMAL}. */

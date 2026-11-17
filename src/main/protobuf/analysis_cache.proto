@@ -36,6 +36,21 @@ service AnalysisCache {
   // Expansion is a prefetch, never an answer. A reference the writer did not record, or one whose
   // target is absent, only means the reader asks for that key itself later.
   rpc Fetch(stream FetchRequest) returns (stream FetchResponse);
+
+  // Names the entries that a change to some files and directory listings can invalidate.
+  //
+  // Every entry Bazel caches is written with its file system dependencies: a graph of entries
+  // for dependency sets, files and listings, which the writer's `references` spell out. A reader
+  // whose workspace differs from the writer's has to find the cached entries its changes reach,
+  // and on its own it downloads the dependency graph of every entry it reads to look. The service
+  // holds the same graph and walks it the other way: from the entries of the changed paths to
+  // everything that names them, however indirectly.
+  //
+  // A reader uses whatever this does not name, so the answer has to be complete, and it is only
+  // if every dependency entry in the store was written with all its references and with a marker
+  // for each path it resolves to through symbolic links (see Entry.references). A service whose
+  // store may hold entries written without them must answer UNIMPLEMENTED.
+  rpc Affected(AffectedRequest) returns (stream AffectedResponse);
 }
 
 // The tenant a request is served under is resolved by the service from the caller's credentials.
@@ -74,6 +89,18 @@ message Entry {
   // of each one's key, eight bytes each, least significant byte first. Set on Put only; never
   // returned. Advisory: see Fetch. A hash, not the key, because a collision only costs a reader
   // an entry it did not need, and the keys came to half as many bytes again as the values.
+  //
+  // Affected walks these backwards, and for that two things in them matter. A reference of zero
+  // is a separator: the references after it are to entries of which only the contents matter to
+  // a reader of this one (the source file of a set of dependencies), and Affected says which
+  // entries a change reaches through such a reference alone. Every set of dependencies has a
+  // separator, last if nothing follows it, and Affected walks only through entries that have
+  // one and the entries of files and listings: not through the references of cached values,
+  // which are most of a store's and lead to no dependency. And a dependency entry references a
+  // marker, an entry with no value whose key is `~`, the delimiter of a file's or a listing's
+  // key and a path, for each path it resolves to that its own key does not name. A fingerprint
+  // can read as such a key, so a key of sixteen bytes is found by its path like a marker and is
+  // otherwise treated as the entry it may be: never left out of an answer.
   bytes references = 3;
 }
 
@@ -86,6 +113,25 @@ message FetchRequest {
 
   // Send the entries of `keys` even if the stream has sent them before.
   bool force = 3;
+}
+
+message AffectedRequest {
+  // Paths of changed files, as Bazel names them in dependency keys: relative to the workspace.
+  repeated string files = 1;
+
+  // Paths of directories whose listings changed.
+  repeated string listings = 2;
+}
+
+message AffectedResponse {
+  // Keys of entries that reach the entry or the marker of a changed path through references
+  // before any separator, in no particular order, each once over the whole stream. The entries of
+  // the changed paths are among them and markers are not, but for a marker whose key is as long
+  // as a fingerprint.
+  repeated bytes keys = 1;
+
+  // Keys of entries that reach one only through a reference after a separator.
+  repeated bytes contents_only_keys = 2;
 }
 
 message FetchResponse {

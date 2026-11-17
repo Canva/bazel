@@ -33,6 +33,9 @@ public final class References {
   /** Bytes one packed reference takes. */
   public static final int BYTES = 8;
 
+  /** See {@link #addContentsSeparator}. */
+  public static final long CONTENTS_SEPARATOR = 0;
+
   private static final long FNV_OFFSET_BASIS = 0xcbf29ce484222325L;
   private static final long FNV_PRIME = 0x100000001b3L;
 
@@ -76,6 +79,25 @@ public final class References {
   @CanIgnoreReturnValue
   public References add(KeyBytesProvider key) {
     return add(key.toBytes());
+  }
+
+  /**
+   * Ends the references a reader of the entry depends on in full. Those added after this are to
+   * entries of which only the contents matter to it: the source file of a set of dependencies,
+   * which changes what executing an action gives and not what analysis gives. A store that names
+   * the entries a change reaches says which of the two reached each one.
+   *
+   * <p>A set of dependencies always has one, at the end if it has no source file. A store that
+   * names the entries a change reaches walks from the entries of files and listings, which it
+   * knows by their keys, through entries that have a separator, and so through none of the many
+   * references from cached values to the values they share.
+   *
+   * <p>The separator is a reference of zero, which a store that only follows references finds no
+   * entry for.
+   */
+  @CanIgnoreReturnValue
+  public References addContentsSeparator() {
+    return addHash(CONTENTS_SEPARATOR);
   }
 
   /** Adds every reference in {@code packed}, which may be null. */

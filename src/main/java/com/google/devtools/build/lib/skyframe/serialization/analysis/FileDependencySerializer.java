@@ -25,6 +25,7 @@ import static com.google.devtools.build.lib.skyframe.serialization.WriteStatuses
 import static com.google.devtools.build.lib.skyframe.serialization.analysis.FileDependencyKeySupport.DIRECTORY_KEY_DELIMITER;
 import static com.google.devtools.build.lib.skyframe.serialization.analysis.FileDependencyKeySupport.FILE_KEY_DELIMITER;
 import static com.google.devtools.build.lib.skyframe.serialization.analysis.FileDependencyKeySupport.MAX_KEY_LENGTH;
+import static com.google.devtools.build.lib.skyframe.serialization.analysis.FileDependencyKeySupport.computeMarkerKey;
 import static com.google.devtools.build.lib.skyframe.serialization.analysis.FileDependencyKeySupport.computeCacheKey;
 import static com.google.devtools.build.lib.skyframe.serialization.analysis.InvalidationDataInfoOrFuture.ConstantFileData.CONSTANT_FILE;
 import static com.google.devtools.build.lib.skyframe.serialization.analysis.InvalidationDataInfoOrFuture.ConstantListingData.CONSTANT_LISTING;
@@ -331,6 +332,25 @@ public final class FileDependencySerializer {
   private final ConcurrentHashMap<PathFragment, WriteStatus> plainDirectoryRecords =
       new ConcurrentHashMap<>();
 
+  /**
+   * Write statuses of the markers {@link #addResolvedPathMarker} has written, by key.
+   *
+   * <p>Many entries resolve to one path: every path through a directory that is a symbolic link
+   * resolves through the directory behind it.
+   */
+  private final ConcurrentHashMap<String, WriteStatus> resolvedPathMarkers =
+      new ConcurrentHashMap<>();
+
+  private static final byte[] NO_BYTES = new byte[0];
+
+  /** Markers written since {@link #takeResolvedPathMarkersWritten} was last called. */
+  private static final AtomicLong RESOLVED_PATH_MARKERS_WRITTEN = new AtomicLong();
+
+  /** Returns how many markers of resolved paths were written since this was last called. */
+  static long takeResolvedPathMarkersWritten() {
+    return RESOLVED_PATH_MARKERS_WRITTEN.getAndSet(0);
+  }
+
   /** The newest version of any module file in the graph, computed on first use. */
   private final Supplier<Long> moduleFilesVersion =
       Suppliers.memoize(this::computeModuleFilesVersion);
@@ -593,6 +613,13 @@ public final class FileDependencySerializer {
     /** The parent entries a reader resolves this one through, which it reads next. */
     private final References references = new References(1);
 
+    /**
+     * The paths a reader matches changes against for this entry that are not the path of its key:
+     * the path behind a parent that is reached through a symbolic link, and what each link the
+     * path itself is resolves to.
+     */
+    @Nullable private ArrayList<PathFragment> resolvedPaths;
+
     private long mtsv;
 
     private FileInvalidationDataUploader(
@@ -612,6 +639,11 @@ public final class FileDependencySerializer {
     public FileInvalidationDataInfo apply(Void unused) {
       String cacheKey = computeCacheKey(rootedPath.getRootRelativePath(), mtsv, FILE_KEY_DELIMITER);
       KeyBytesProvider keyBytes = getKeyBytes(cacheKey, data::setOverflowKey);
+      if (resolvedPaths != null) {
+        for (PathFragment path : resolvedPaths) {
+          addResolvedPathMarker(references, writeStatuses, path, FILE_KEY_DELIMITER);
+        }
+      }
       byte[] dataBytes = data.build().toByteArray();
       long keyByteCount = keyBytes.toBytes().length;
       long valueByteCount = dataBytes.length; // Don't hold on to the bytes any longer than needed
@@ -684,6 +716,20 @@ public final class FileDependencySerializer {
       }
     }
 
+    /**
+     * Notes a path that {@link FileDependencyDeserializer} gives this entry: see {@link
+     * #resolvedPaths}.
+     */
+    private void addResolvedPath(PathFragment path) {
+      if (path.isEmpty() || path.equals(rootedPath.getRootRelativePath())) {
+        return;
+      }
+      if (resolvedPaths == null) {
+        resolvedPaths = new ArrayList<>(1);
+      }
+      resolvedPaths.add(path);
+    }
+
     private Symlink.Builder addSymlinksBuilder() {
       return data.addSymlinksBuilder();
     }
@@ -731,6 +777,15 @@ public final class FileDependencySerializer {
               yield parentReference.realPath();
             }
           };
+
+      if (!realParentPath.equals(uploader.parentRootedPath)) {
+        // The parent is reached through a link, so this entry is matched under the directory
+        // behind it and is keyed under the path through the link.
+        uploader.addResolvedPath(
+            realParentPath
+                .getRootRelativePath()
+                .getRelative(uploader.rootedPath.getRootRelativePath().getBaseName()));
+      }
 
       if (unresolvedLinkTarget == null) {
         return immediateVoidFuture(); // No symlink processing needed.
@@ -805,6 +860,7 @@ public final class FileDependencySerializer {
     if (linkParent.startsWith(unresolvedTargetParent)) {
       // Any ancestor directories of the fully resolved `linkParent` are already resolved so
       // there's no further ancestor resolution here.
+      uploader.addResolvedPath(unresolvedTarget);
       return processSymlinkTarget(
           toRootedPath(parentRootedPath.getRoot(), unresolvedTarget), uploader);
     }
@@ -869,6 +925,7 @@ public final class FileDependencySerializer {
     @Override
     public ListenableFuture<Void> apply(FileDataInfo realParentData) {
       RootedPath resolvedParentRootedPath;
+      boolean parentExists = true;
       switch (realParentData) {
         case CONSTANT_FILE ->
             // Assumes that symlinks in BundledFileSystem do not escape.
@@ -879,18 +936,21 @@ public final class FileDependencySerializer {
           if (parentMtsv != LongVersionGetter.MINIMAL) {
             symlinkData.setParentMtsv(parentMtsv);
           }
-          if (!parentReference.exists()) {
-            // The parent folder doesn't exist so further resolution of the symlink is moot.
-            return immediateVoidFuture();
-          }
+          parentExists = parentReference.exists();
           resolvedParentRootedPath = parentReference.realPath();
         }
       }
-      return processSymlinkTarget(
+      RootedPath resolvedSymlinkPath =
           toRootedPath(
               resolvedParentRootedPath.getRoot(),
-              resolvedParentRootedPath.getRootRelativePath().getRelative(link.getBaseName())),
-          uploader);
+              resolvedParentRootedPath.getRootRelativePath().getRelative(link.getBaseName()));
+      // A reader gives the entry this path whether or not the parent exists.
+      uploader.addResolvedPath(resolvedSymlinkPath.getRootRelativePath());
+      if (!parentExists) {
+        // The parent folder doesn't exist so further resolution of the symlink is moot.
+        return immediateVoidFuture();
+      }
+      return processSymlinkTarget(resolvedSymlinkPath, uploader);
     }
   }
 
@@ -964,6 +1024,11 @@ public final class FileDependencySerializer {
             data.setFileMtsv(fileMtsv);
           }
           realPath = fileInfo.realPath();
+          if (!realPath.getRootRelativePath().equals(rootedPath.getRootRelativePath())) {
+            // A reader matches a change of listing against the directory behind the links.
+            addResolvedPathMarker(
+                references, writeStatuses, realPath.getRootRelativePath(), DIRECTORY_KEY_DELIMITER);
+          }
         }
       }
 
@@ -1175,6 +1240,11 @@ public final class FileDependencySerializer {
       for (String listingKey : sortedListingKeys) {
         addReference(references, listingKey);
       }
+      // Only the contents of the source file matter to a reader of this node, and only to one
+      // that reads what executing gave. The separator is there without a source file too: it is
+      // also how a store knows this entry for a set of dependencies, whose key is a fingerprint
+      // like that of any value. See References#addContentsSeparator.
+      references.addContentsSeparator();
       if (sourceFileKey != null) {
         addReference(references, sourceFileKey);
       }
@@ -1658,6 +1728,41 @@ public final class FileDependencySerializer {
     return cacheKey.length() > MAX_KEY_LENGTH
         ? references.add(writer.fingerprint(key))
         : references.add(key);
+  }
+
+  /**
+   * Has the entry with {@code references} reference the marker of {@code path}, a path a reader
+   * matches changes against for that entry which its key does not name, and writes the marker if
+   * nothing has yet. See {@link FileDependencyKeySupport#MARKER_PREFIX}.
+   *
+   * <p>Nothing is written for a store that takes no references, which could not find the entry
+   * from the marker, or for a path too long to be a key: a reader asks a store which entries its
+   * changes reach only when every changed path is short enough to be one.
+   *
+   * @param delimiter {@link FileDependencyKeySupport#FILE_KEY_DELIMITER} if the entry is matched
+   *     against changes to the path, {@link FileDependencyKeySupport#DIRECTORY_KEY_DELIMITER} if
+   *     against changes to its listing
+   */
+  private void addResolvedPathMarker(
+      References references,
+      ArrayList<WriteStatus> writeStatuses,
+      PathFragment path,
+      byte delimiter) {
+    if (!(writer instanceof ReferencingWriter)) {
+      return;
+    }
+    String markerKey = computeMarkerKey(path.getPathString(), delimiter);
+    if (markerKey.length() > MAX_KEY_LENGTH) {
+      return;
+    }
+    writeStatuses.add(
+        resolvedPathMarkers.computeIfAbsent(
+            markerKey,
+            key -> {
+              RESOLVED_PATH_MARKERS_WRITTEN.incrementAndGet();
+              return writer.put(new StringKey(key), NO_BYTES);
+            }));
+    addReference(references, markerKey);
   }
 
   /**

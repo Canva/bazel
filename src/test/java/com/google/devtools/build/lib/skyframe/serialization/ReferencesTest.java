@@ -64,6 +64,24 @@ public final class ReferencesTest {
   }
 
   @Test
+  public void contentsSeparator_isAReferenceOfZero() {
+    // The analysis cache service reads a zero as the end of the references an entry depends on
+    // in full, so this is part of the wire format too.
+    byte[] packed =
+        new References()
+            .add("foobar".getBytes(UTF_8))
+            .addContentsSeparator()
+            .add("a".getBytes(UTF_8))
+            .pack();
+
+    ByteBuffer buffer = ByteBuffer.wrap(packed).order(ByteOrder.LITTLE_ENDIAN);
+    assertThat(packed).hasLength(3 * References.BYTES);
+    assertThat(buffer.getLong()).isEqualTo(0x85944171f73967e8L);
+    assertThat(buffer.getLong()).isEqualTo(0L);
+    assertThat(buffer.getLong()).isEqualTo(0xaf63dc4c8601ec8cL);
+  }
+
+  @Test
   public void pack_ofNothing_isNull() {
     assertThat(new References().pack()).isNull();
     assertThat(new References().addAll(null).isEmpty()).isTrue();
