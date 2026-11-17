@@ -161,8 +161,23 @@ public final class TargetParsingCompleteEvent implements BuildEventWithOrderCons
     return ImmutableList.of(BuildEventIdUtil.buildStartedId());
   }
 
+  /**
+   * The ids of the children, made once: there is one for each target, and the event is asked for
+   * them when it is posted and again when it is sent.
+   */
+  private volatile ImmutableList<BuildEventId> children;
+
   @Override
   public Collection<BuildEventId> getChildrenEvents() {
+    ImmutableList<BuildEventId> made = children;
+    if (made == null) {
+      made = makeChildrenEvents();
+      children = made;
+    }
+    return made;
+  }
+
+  private ImmutableList<BuildEventId> makeChildrenEvents() {
     ImmutableList.Builder<BuildEventId> childrenBuilder = ImmutableList.builder();
     for (String failedTargetPattern : failedTargetPatterns) {
       childrenBuilder.add(
