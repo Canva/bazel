@@ -52,6 +52,21 @@ public abstract class SkycacheFetchOptions extends OptionsBase {
   public abstract boolean getAskAffected();
 
   @Option(
+      name = "canva_skycache_cut_module_graph",
+      defaultValue = "false",
+      documentationCategory = OptionDocumentationCategory.UNDOCUMENTED,
+      effectTags = {OptionEffectTag.BAZEL_INTERNAL_CONFIGURATION},
+      help =
+          "A writer records the repository mapping, the registered toolchains and execution"
+              + " platforms and the definition of each external repository as one dependency"
+              + " each, versioned by a digest of the value, and not the module files and"
+              + " lockfiles they were computed from, which every cached value otherwise depends"
+              + " on. The writer's half only: no reader compares those digests yet, so one that"
+              + " reads such an upload does not notice a change to the module graph. For"
+              + " measuring what such a change would then invalidate.")
+  public abstract boolean getCutModuleGraph();
+
+  @Option(
       name = "canva_skycache_execution_values",
       defaultValue = "false",
       documentationCategory = OptionDocumentationCategory.UNDOCUMENTED,

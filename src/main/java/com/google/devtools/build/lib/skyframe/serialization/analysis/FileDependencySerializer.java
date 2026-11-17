@@ -33,6 +33,7 @@ import static com.google.devtools.build.lib.skyframe.serialization.analysis.Inva
 import static com.google.devtools.build.lib.util.TestType.isInTest;
 import static com.google.devtools.build.lib.vfs.RootedPath.toRootedPath;
 import static java.lang.Math.max;
+import static java.nio.charset.StandardCharsets.ISO_8859_1;
 import static java.nio.charset.StandardCharsets.UTF_8;
 
 import com.google.common.annotations.VisibleForTesting;
@@ -56,6 +57,7 @@ import com.google.devtools.build.lib.profiler.CounterSeriesTask;
 import com.google.devtools.build.lib.profiler.CounterSeriesTask.Color;
 import com.google.devtools.build.lib.profiler.CounterSeriesTaskImpl;
 import com.google.devtools.build.lib.cmdline.LabelConstants;
+import com.google.devtools.build.lib.cmdline.RepositoryName;
 import com.google.devtools.build.lib.skyframe.AbstractNestedFileOpNodes;
 import com.google.devtools.build.lib.skyframe.AbstractNestedFileOpNodes.NestedFileOpNodes;
 import com.google.devtools.build.lib.skyframe.AbstractNestedFileOpNodes.NestedFileOpNodesWithSource;
@@ -91,12 +93,14 @@ import com.google.devtools.build.lib.skyframe.serialization.proto.DirectoryListi
 import com.google.devtools.build.lib.skyframe.serialization.proto.FileInvalidationData;
 import com.google.devtools.build.lib.skyframe.serialization.proto.Symlink;
 import com.google.devtools.build.lib.versioning.LongVersionGetter;
+import com.google.devtools.build.lib.vfs.FileSystemUtils;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.devtools.build.lib.vfs.Root;
 import com.google.devtools.build.lib.vfs.RootedPath;
 import com.google.devtools.build.skyframe.InMemoryGraph;
 import com.google.devtools.build.skyframe.InMemoryNodeEntry;
+import com.google.devtools.build.skyframe.SkyKey;
 import com.google.errorprone.annotations.CanIgnoreReturnValue;
 import com.google.errorprone.annotations.DoNotCall;
 import com.google.protobuf.CodedOutputStream;
@@ -104,6 +108,8 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.io.UncheckedIOException;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.concurrent.Callable;
@@ -301,6 +307,127 @@ public final class FileDependencySerializer {
     repositoryBoundary = boundary;
   }
 
+  /**
+   * Stops the search for what a value depends on at the four kinds of value through which the
+   * module graph reaches a build, and records a digest of each in place of the files below it.
+   *
+   * <p>Every package, {@code .bzl} file and configured target depends on the repository mapping,
+   * and so on every module file and on the lockfile: three commits of the monorepo's main branch
+   * in a hundred edit one, and each invalidates everything that was uploaded. Bazel itself
+   * resolves the modules again after such an edit and reruns nothing where the result is what it
+   * was. With this set the writer does the same by construction: a repository mapping, the
+   * registered toolchains, the registered execution platforms and the definition of a
+   * repository are each recorded as one entry, keyed by a path that names the value and
+   * versioned by a digest of it, and nothing below them is.
+   *
+   * <p><b>A writer's half only.</b> A reader has to compute the same digests for its own
+   * workspace and treat as changed every such entry whose version differs, and no reader does
+   * yet: one that reads an upload made with this set does not notice a change to the module
+   * graph. It is here to measure, on an upload, what such a change would then reach.
+   */
+  private static volatile boolean cutAtModuleGraph = false;
+
+  public static void setCutAtModuleGraph(boolean cut) {
+    cutAtModuleGraph = cut;
+    STAND_IN_DIGESTS.clear();
+  }
+
+  /** The first segment, under {@code external/}, of the paths that stand for values. */
+  private static final String STAND_IN_REPOSITORY = "@skycache";
+
+  /** The digests of the values that stand-in paths stand for, by path under {@code external/}. */
+  private static final ConcurrentHashMap<String, Long> STAND_IN_DIGESTS =
+      new ConcurrentHashMap<>();
+
+  /** Stand-ins handed out since {@link #takeStandInsUsed} was last called. */
+  private static final AtomicLong STAND_INS_USED = new AtomicLong();
+
+  static long takeStandInsUsed() {
+    return STAND_INS_USED.getAndSet(0);
+  }
+
+  /**
+   * Returns the file key that stands for the value of {@code key} among the dependencies of
+   * whatever depends on it, or null if the search goes on below {@code key} as usual.
+   *
+   * <p>See {@link #setCutAtModuleGraph}. The definition of a repository is stood for by the entry
+   * that already stands for the files inside the repository, {@code external/<name>}; the other
+   * three by a path under {@code external/@skycache/}.
+   */
+  @Nullable
+  static FileKey standInFor(SkyKey key, InMemoryGraph graph) {
+    RepositoryBoundary boundary = repositoryBoundary;
+    if (!cutAtModuleGraph || boundary == null) {
+      return null;
+    }
+    String kind;
+    switch (key.functionName().getName()) {
+      case "REPOSITORY_MAPPING" -> kind = "repository_mapping";
+      case "REGISTERED_TOOLCHAINS" -> kind = "registered_toolchains";
+      case "REGISTERED_EXECUTION_PLATFORMS" -> kind = "registered_execution_platforms";
+      case "REPO_DEFINITION" -> kind = null;
+      default -> {
+        return null;
+      }
+    }
+    InMemoryNodeEntry entry = graph.getIfPresent(key);
+    if (entry == null || entry.getValue() == null) {
+      return null; // Missing or in error: the search reports that as it always has.
+    }
+    Root externalRoot = Root.fromPath(boundary.externalRoot());
+    if (kind == null) {
+      if (!(key.argument() instanceof RepositoryName repository) || repository.isMain()) {
+        return null;
+      }
+      STAND_INS_USED.incrementAndGet();
+      return FileKey.create(toRootedPath(externalRoot, PathFragment.create(repository.getName())));
+    }
+    // The key names the value and its digest is its version. Both are of what toString gives,
+    // which for these values is their contents; a reader needs a form that is canonical by
+    // design before it can compare digests.
+    PathFragment path =
+        PathFragment.create(STAND_IN_REPOSITORY)
+            .getRelative(kind)
+            .getRelative(Long.toHexString(digest(key.toString())));
+    STAND_IN_DIGESTS.put(path.getPathString(), digest(entry.getValue().toString()));
+    STAND_INS_USED.incrementAndGet();
+    return FileKey.create(toRootedPath(externalRoot, path));
+  }
+
+  /** A digest that fits where a version does: non-negative, and never the minimal version. */
+  private static long digest(String text) {
+    byte[] bytes;
+    try {
+      bytes = MessageDigest.getInstance("SHA-256").digest(text.getBytes(UTF_8));
+    } catch (NoSuchAlgorithmException e) {
+      throw new IllegalStateException(e);
+    }
+    long value = 0;
+    for (int i = 0; i < 8; i++) {
+      value = (value << 8) | (bytes[i] & 0xff);
+    }
+    return value >>> 2;
+  }
+
+  /**
+   * Returns a digest of what Bazel itself keeps to decide whether to fetch {@code repository}
+   * again, the first line of its marker file, or null if it has none.
+   */
+  @Nullable
+  private static Long markerDigest(RepositoryBoundary boundary, String repository) {
+    try {
+      Path marker = boundary.externalRoot().getChild("@" + repository + ".marker");
+      if (!marker.exists()) {
+        return null;
+      }
+      String content = FileSystemUtils.readContent(marker, ISO_8859_1);
+      int end = content.indexOf('\n');
+      return digest(end < 0 ? content : content.substring(0, end));
+    } catch (IOException e) {
+      return null;
+    }
+  }
+
   /** Whether {@code baseName} names a file that can change what an external repository holds. */
   private static boolean isModuleFile(String baseName) {
     return baseName.equals("MODULE.bazel")
@@ -323,6 +450,16 @@ public final class FileDependencySerializer {
   /** One synthetic file entry per external repository, keyed by repository name. */
   private final ConcurrentHashMap<String, FileInvalidationDataInfo> repositoryFileData =
       new ConcurrentHashMap<>();
+
+  /** The entries of the paths that stand for values, by path under {@code external/}. */
+  private final ConcurrentHashMap<String, FileInvalidationDataInfo> standInFileData =
+      new ConcurrentHashMap<>();
+
+  /**
+   * The version in the keys of each repository's entries: that of the module files, or with
+   * {@link #cutAtModuleGraph} a digest of the repository's definition.
+   */
+  private final ConcurrentHashMap<String, Long> repositoryKeyVersions = new ConcurrentHashMap<>();
 
   /** One synthetic listing entry per external repository, keyed by repository name. */
   private final ConcurrentHashMap<String, ListingInvalidationDataInfo> repositoryListingData =
@@ -1561,12 +1698,46 @@ public final class FileDependencySerializer {
                 realRootedPath));
       }
     }
+    if (STAND_IN_REPOSITORY.equals(repository)) {
+      return future.completeWith(
+          getStandInFileData(
+              rootedPath.asPath().asFragment().relativeTo(boundary.externalRoot().asFragment())));
+    }
     try {
       return future.completeWith(
           repository == null ? CONSTANT_FILE : getRepositoryFileData(repository));
     } catch (IOException e) {
       return future.failWith(e);
     }
+  }
+
+  /**
+   * Returns, writing it on first use, the entry of a path that stands for a value: see {@link
+   * #standInFor}. Its key has the digest of the value where a file's has its version, and it
+   * counts as never having changed, since its digest and not a version says whether it has.
+   */
+  private FileInvalidationDataInfo getStandInFileData(PathFragment underExternal) {
+    return standInFileData.computeIfAbsent(
+        underExternal.getPathString(),
+        path -> {
+          PathFragment keyPath = LabelConstants.EXTERNAL_REPOSITORY_LOCATION.getRelative(path);
+          long digest = checkNotNull(STAND_IN_DIGESTS.get(path), path);
+          var data = FileInvalidationData.newBuilder();
+          String cacheKey = computeCacheKey(keyPath, digest, FILE_KEY_DELIMITER);
+          KeyBytesProvider keyBytes = getKeyBytes(cacheKey, data::setOverflowKey);
+          return new FileInvalidationDataInfo(
+              cacheKey,
+              aggregateWriteStatuses(
+                  ImmutableList.of(
+                      put(
+                          keyBytes,
+                          data.build().toByteArray(),
+                          plainDirectoryReference(keyPath.getParentDirectory())),
+                      writeDirectoryRecords(keyPath.getParentDirectory()))),
+              /* exists= */ true,
+              LongVersionGetter.MINIMAL,
+              toRootedPath(Root.fromPath(boundary.externalRoot()), underExternal));
+        });
   }
 
   /** The listing counterpart of {@link #populateRepositoryFileDataInfo}. */
@@ -1624,9 +1795,14 @@ public final class FileDependencySerializer {
     return repositoryFileData.computeIfAbsent(
         repository,
         name -> {
+          // With the module graph cut away, a repository changes when its definition does, and a
+          // version of the module files says nothing about it: see setCutAtModuleGraph.
+          Long definition = cutAtModuleGraph ? markerDigest(boundary, name) : null;
+          long keyVersion = definition != null ? definition : version;
+          repositoryKeyVersions.put(name, keyVersion);
           var data = FileInvalidationData.newBuilder();
           PathFragment keyPath = repositoryKeyPath(name);
-          String cacheKey = computeCacheKey(keyPath, version, FILE_KEY_DELIMITER);
+          String cacheKey = computeCacheKey(keyPath, keyVersion, FILE_KEY_DELIMITER);
           KeyBytesProvider keyBytes = getKeyBytes(cacheKey, data::setOverflowKey);
           return new FileInvalidationDataInfo(
               cacheKey,
@@ -1638,7 +1814,7 @@ public final class FileDependencySerializer {
                           plainDirectoryReference(keyPath.getParentDirectory())),
                       writeDirectoryRecords(keyPath.getParentDirectory()))),
               /* exists= */ true,
-              version,
+              definition != null ? LongVersionGetter.MINIMAL : version,
               toRootedPath(Root.fromPath(boundary.externalRoot()), PathFragment.create(name)));
         });
   }
@@ -1646,18 +1822,21 @@ public final class FileDependencySerializer {
   /** Returns, writing it on first use, the single listing entry standing for {@code repository}. */
   private ListingInvalidationDataInfo getRepositoryListingData(String repository)
       throws IOException {
-    long version = getModuleFilesVersion();
+    long moduleFilesVersion = getModuleFilesVersion();
     // A reader resolves the listing through the repository's file entry, so that has to exist.
     FileInvalidationDataInfo fileData = getRepositoryFileData(repository);
     return repositoryListingData.computeIfAbsent(
         repository,
         name -> {
+          // The version the file entry was keyed with, which a reader makes that key from.
+          long keyVersion = repositoryKeyVersions.getOrDefault(name, moduleFilesVersion);
+          long version = fileData.mtsv();
           var data = DirectoryListingInvalidationData.newBuilder();
-          if (version != LongVersionGetter.MINIMAL) {
-            data.setFileMtsv(version);
+          if (keyVersion != LongVersionGetter.MINIMAL) {
+            data.setFileMtsv(keyVersion);
           }
           String cacheKey =
-              computeCacheKey(repositoryKeyPath(name), version, DIRECTORY_KEY_DELIMITER);
+              computeCacheKey(repositoryKeyPath(name), keyVersion, DIRECTORY_KEY_DELIMITER);
           KeyBytesProvider keyBytes = getKeyBytes(cacheKey, data::setOverflowKey);
           return new ListingInvalidationDataInfo(
               cacheKey,

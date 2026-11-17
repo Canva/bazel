@@ -231,6 +231,7 @@ java_library(
         "//src/test/java/com/google/devtools/build/lib/skyframe/serialization/analysis:__pkg__",
     ],
     deps = [
+        ":file_dependency_serializer",
         ":missing_skyframe_entry_exception",
         ":value_or_future_map",
         "//src/main/java/com/google/devtools/build/lib/actions:action_lookup_data",
@@ -287,6 +288,7 @@ java_library(
         "//src/main/java/com/google/devtools/build/lib/vfs",
         "//src/main/java/com/google/devtools/build/lib/vfs:pathfragment",
         "//src/main/java/com/google/devtools/build/skyframe",
+        "//src/main/java/com/google/devtools/build/skyframe:skyframe-objects",
         "//src/main/protobuf:file_invalidation_data_java_proto",
         "//third_party/java/guava:annotations",
         "//third_party/java/guava:base",

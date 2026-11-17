@@ -273,6 +273,9 @@ public final class FrontierSerializer {
                       + String.format(
                           "; %s markers for paths behind symbolic links",
                           FileDependencySerializer.takeResolvedPathMarkersWritten())
+                      + String.format(
+                          "; the module graph cut away %s times",
+                          FileDependencySerializer.takeStandInsUsed())
                       + (serializationStats.nodesAboveAnError() == 0
                           ? ""
                           : String.format(

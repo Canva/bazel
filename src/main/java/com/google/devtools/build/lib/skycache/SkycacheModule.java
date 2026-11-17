@@ -192,6 +192,10 @@ public final class SkycacheModule extends SerializationModule {
             && (!nullToEmpty(options.getRemoteAnalysisCache()).isEmpty()
                 || (localOptions != null && !localOptions.getLocalPath().isEmpty()));
     FileDependencySerializer.setTolerateAbsoluteSymlinks(enabled);
+    FileDependencySerializer.setCutAtModuleGraph(
+        enabled
+            && env.getOptions().getOptions(SkycacheFetchOptions.class) != null
+            && env.getOptions().getOptions(SkycacheFetchOptions.class).getCutModuleGraph());
     // Execution values are served as misses anyway, and some cannot be serialized: see
     // ExecutionValueCaching. A stock build keeps both its upload and its lookups.
     SkycacheFetchOptions fetchOptions = env.getOptions().getOptions(SkycacheFetchOptions.class);

@@ -251,6 +251,13 @@ public final class FileOpNodeMemoizingLookup {
           case DerivedArtifact artifact -> artifact.getArtifactOwner();
           default -> key;
         };
+    // What the module graph reaches a build through is stood for by one entry each, and the
+    // search does not go below: see FileDependencySerializer#setCutAtModuleGraph.
+    FileKey standIn = FileDependencySerializer.standInFor(dependencyKey, graph);
+    if (standIn != null) {
+      collector.addNode(standIn);
+      return;
+    }
     switch (nodes.getValueOrFuture(dependencyKey)) {
       case EMPTY_FILE_OP_NODE -> {}
       case FileOpNode node -> collector.addNode(node);
