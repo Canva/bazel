@@ -36,12 +36,24 @@ import javax.annotation.concurrent.Immutable;
  */
 @Immutable
 public final class BuildEventIdUtil {
+  /**
+   * One instance of each label's string in the ids that name it. Not {@link String#intern}: the
+   * JVM's string table took about two microseconds a string, and a build of half a million targets
+   * makes several ids for each, some of them on the one thread that is busy between loading and
+   * analysis.
+   */
+  private static final Interner<String> LABEL_INTERNER =
+      Interners.newBuilder()
+          .weak()
+          .concurrencyLevel(Runtime.getRuntime().availableProcessors())
+          .build();
+
   private static String internLabel(Label label) {
-    return label.toString().intern();
+    return LABEL_INTERNER.intern(label.toString());
   }
 
   private static String internLabel(String label) {
-    return label.intern();
+    return LABEL_INTERNER.intern(label);
   }
 
   private static final Interner<ConfigurationId> CONFIGURATION_ID_INTERNER =
