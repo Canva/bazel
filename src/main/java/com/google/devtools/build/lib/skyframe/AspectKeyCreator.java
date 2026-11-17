@@ -411,11 +411,17 @@ public final class AspectKeyCreator {
 
     /** Names the aspects and their parameters, which are the same for every target of a build. */
     public String getAspectsName() {
+      return aspectsName(topLevelAspectsClasses, topLevelAspectsParameters);
+    }
+
+    /** The name the keys of these aspects with these parameters have, before there is a key. */
+    public static String aspectsName(
+        ImmutableList<AspectClass> aspectClasses, ImmutableMap<String, String> parameters) {
       StringBuilder name = new StringBuilder();
-      for (AspectClass aspectClass : topLevelAspectsClasses) {
+      for (AspectClass aspectClass : aspectClasses) {
         name.append(aspectClass.getKey()).append('\n');
       }
-      return name.append(new java.util.TreeMap<>(topLevelAspectsParameters)).toString();
+      return name.append(new java.util.TreeMap<>(parameters)).toString();
     }
 
     @Override

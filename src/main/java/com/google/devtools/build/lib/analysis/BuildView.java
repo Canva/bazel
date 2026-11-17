@@ -83,6 +83,7 @@ import com.google.devtools.build.lib.skyframe.AspectKeyCreator;
 import com.google.devtools.build.lib.skyframe.AspectKeyCreator.AspectKey;
 import com.google.devtools.build.lib.skyframe.AspectKeyCreator.TopLevelAspectsKey;
 import com.google.devtools.build.lib.skyframe.BuildResultListener;
+import com.google.devtools.build.lib.skyframe.BuiltPackages;
 import com.google.devtools.build.lib.skyframe.ConfiguredTargetKey;
 import com.google.devtools.build.lib.skyframe.CoverageReportValue;
 import com.google.devtools.build.lib.skyframe.RepositoryMappingValue.RepositoryMappingResolutionException;
@@ -258,6 +259,26 @@ public class BuildView {
 
     skyframeBuildView.resetProgressReceiver();
 
+    // A reader of the analysis cache that reports what was built without fetching it asks about
+    // whole packages before it evaluates anything, and what it asks needs neither a configuration
+    // nor the key of a target. So it starts asking now, and the answers arrive while the
+    // configuration and the keys are made.
+    if (includeExecutionPhase && remoteAnalysisCacheReaderDeps.mode().isRetrievalEnabled()) {
+      try {
+        ImmutableList<AspectClass> aspectClasses =
+            resolveAspectClasses(aspects, ExtendedEventHandler.NOOP);
+        BuiltPackages.askEarly(
+            loadingResult.getTargetLabels(),
+            topLevelOptions,
+            aspectClasses.isEmpty()
+                ? ""
+                : TopLevelAspectsKey.aspectsName(aspectClasses, aspectsParameters),
+            remoteAnalysisCacheReaderDeps);
+      } catch (ViewCreationFailedException e) {
+        // Reported where the keys of the aspects are made.
+      }
+    }
+
     ImmutableMap<Label, Target> labelToTargetMap = constructLabelToTargetMap(loadingResult);
     eventBus.post(new AnalysisPhaseStartedEvent(labelToTargetMap.values()));
 
@@ -301,6 +322,8 @@ public class BuildView {
                 topLevelPlatform, baselines.targetBaseline(), baselines.execBaseline()));
       }
     }
+
+    BuiltPackages.configurationsMade();
 
     if (remoteAnalysisCachingDependenciesProvider.mode() == RemoteAnalysisCacheMode.DOWNLOAD) {
       try (SilentCloseable c = Profiler.instance().profile("skycache.metadataQuery")) {
@@ -579,6 +602,27 @@ public class BuildView {
       BuildConfigurationValue configuration,
       ExtendedEventHandler eventHandler)
       throws InterruptedException, ViewCreationFailedException {
+    ImmutableList<AspectClass> aspectClasses = resolveAspectClasses(aspects, eventHandler);
+    if (aspectClasses.isEmpty()) {
+      return ImmutableList.of();
+    }
+
+    return topLevelTargets.entrySet().parallelStream()
+        // Do not run aspects on materializer targets since registering actions is not allowed in
+        // materializer rules (and thus aspects that run on them) and many aspects do register
+        // actions, and there isn't much for an aspect to do on a materializer target anyway.
+        .filter(entry -> !entry.getValue().isMaterializerRule())
+        .map(
+            target ->
+                AspectKeyCreator.createTopLevelAspectsKey(
+                    aspectClasses, target.getKey(), configuration, aspectsParameters))
+        .collect(toImmutableList());
+  }
+
+  /** The classes of the aspects named by {@code --aspects}, which needs no target. */
+  private ImmutableList<AspectClass> resolveAspectClasses(
+      List<String> aspects, ExtendedEventHandler eventHandler)
+      throws InterruptedException, ViewCreationFailedException {
     RepositoryMapping mainRepoMapping;
     try {
       mainRepoMapping = skyframeExecutor.getMainRepoMapping(eventHandler);
@@ -651,21 +695,7 @@ public class BuildView {
         }
       }
     }
-    ImmutableList<AspectClass> aspectClasses = aspectClassesBuilder.build();
-    if (aspectClasses.isEmpty()) {
-      return ImmutableList.of();
-    }
-
-    return topLevelTargets.entrySet().parallelStream()
-        // Do not run aspects on materializer targets since registering actions is not allowed in
-        // materializer rules (and thus aspects that run on them) and many aspects do register
-        // actions, and there isn't much for an aspect to do on a materializer target anyway.
-        .filter(entry -> !entry.getValue().isMaterializerRule())
-        .map(
-            target ->
-                AspectKeyCreator.createTopLevelAspectsKey(
-                    aspectClasses, target.getKey(), configuration, aspectsParameters))
-        .collect(toImmutableList());
+    return aspectClassesBuilder.build();
   }
 
   private AnalysisResult createResult(

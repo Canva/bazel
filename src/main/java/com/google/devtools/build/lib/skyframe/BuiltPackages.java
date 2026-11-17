@@ -18,6 +18,7 @@ import com.google.common.collect.ImmutableSet;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.MoreExecutors;
+import com.google.common.util.concurrent.SettableFuture;
 import com.google.devtools.build.lib.actions.ActionLookupKey;
 import com.google.devtools.build.lib.analysis.TopLevelArtifactContext;
 import com.google.devtools.build.lib.analysis.test.ServedTest;
@@ -38,17 +39,21 @@ import com.google.devtools.build.lib.skyframe.serialization.analysis.ExecutionVa
 import com.google.devtools.build.lib.skyframe.serialization.analysis.RemoteAnalysisCacheReaderDepsProvider;
 import com.google.devtools.build.lib.skyframe.serialization.analysis.TopLevelAdmission;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ForkJoinPool;
+import java.util.concurrent.ForkJoinTask;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
+import javax.annotation.Nullable;
 
 /**
  * Asks the remote analysis cache, once for each package and before any top-level target is
@@ -60,6 +65,130 @@ import java.util.stream.IntStream;
  * records do not answer for is asked about as before.
  */
 public final class BuiltPackages {
+
+  // What askEarly started and ask has not taken yet: whom it asked, a key that spells what it
+  // asked about every package, and the lookups by package.
+  private static RemoteAnalysisCacheReaderDepsProvider earlyDeps;
+  private static CompletedPackageKey earlyKey;
+  private static ForkJoinTask<Map<PackageIdentifier, ListenableFuture<RetrievalResult>>>
+      earlyLookups;
+  // Done when what it takes to read an answer is there: a record names configurations, and
+  // those are read with the command's own top-level configuration at hand.
+  private static SettableFuture<Void> earlyGate;
+
+  private static boolean asks(
+      @Nullable TopLevelAdmission admission, RemoteAnalysisCacheReaderDepsProvider cachingDeps) {
+    return admission != null
+        && admission.withoutValues()
+        && admission.byPackage()
+        && cachingDeps.mode().isRetrievalEnabled()
+        && !cachingDeps.getSkycacheAnalysisOnly();
+  }
+
+  /**
+   * Starts asking about the packages of {@code labels} on other threads and returns at once.
+   *
+   * <p>What is asked about a package needs neither a configuration nor the key of a target, so a
+   * command can call this as soon as it knows its targets, and {@link #ask} then finds the
+   * answers on their way, or there, when the keys have been made. If {@link #ask} is called with
+   * anything else than this was, it asks again.
+   *
+   * @param aspectsName what names the top-level aspects and their parameters, or an empty string
+   */
+  public static synchronized void askEarly(
+      Collection<Label> labels,
+      TopLevelArtifactContext context,
+      String aspectsName,
+      RemoteAnalysisCacheReaderDepsProvider cachingDeps) {
+    earlyDeps = null;
+    earlyKey = null;
+    earlyLookups = null;
+    if (earlyGate != null) {
+      earlyGate.set(null);
+    }
+    earlyGate = null;
+    if (!asks(ExecutionValueCaching.topLevelAdmission(), cachingDeps)) {
+      return;
+    }
+    SettableFuture<Void> gate = SettableFuture.create();
+    earlyGate = gate;
+    earlyDeps = cachingDeps;
+    earlyKey = CompletedPackageKey.of(PackageIdentifier.EMPTY_PACKAGE_ID, context, aspectsName);
+    earlyLookups =
+        ForkJoinPool.commonPool()
+            .submit(
+                () -> {
+                  try (SilentCloseable c =
+                      Profiler.instance().profile("BuiltPackages.askEarly")) {
+                    Set<PackageIdentifier> packages =
+                        labels.parallelStream()
+                            .map(Label::getPackageIdentifier)
+                            .collect(Collectors.toSet());
+                    var lookups =
+                        new ConcurrentHashMap<PackageIdentifier, ListenableFuture<RetrievalResult>>(
+                            2 * packages.size());
+                    packages.parallelStream()
+                        .forEach(
+                            packageId -> {
+                              try {
+                                lookups.put(
+                                    packageId,
+                                    SkyValueRetrieverUtils.retrieveDetached(
+                                        CompletedPackageKey.of(packageId, context, aspectsName),
+                                        cachingDeps,
+                                        gate));
+                              } catch (InterruptedException e) {
+                                // Left out: ask asks about this one itself.
+                              }
+                            });
+                    return lookups;
+                  }
+                });
+  }
+
+  /**
+   * Tells the lookups {@link #askEarly} started that the command's configurations have been made,
+   * which is when their answers can be read.
+   */
+  public static synchronized void configurationsMade() {
+    if (earlyGate != null) {
+      earlyGate.set(null);
+    }
+  }
+
+  /** The lookups {@link #askEarly} started, if it asked what {@link #ask} is about to. */
+  private static Map<PackageIdentifier, ListenableFuture<RetrievalResult>> takeEarly(
+      TopLevelArtifactContext context,
+      String aspectsName,
+      RemoteAnalysisCacheReaderDepsProvider cachingDeps)
+      throws InterruptedException {
+    ForkJoinTask<Map<PackageIdentifier, ListenableFuture<RetrievalResult>>> lookups;
+    synchronized (BuiltPackages.class) {
+      lookups =
+          earlyDeps == cachingDeps
+                  && earlyKey != null
+                  && earlyKey.equals(
+                      CompletedPackageKey.of(
+                          PackageIdentifier.EMPTY_PACKAGE_ID, context, aspectsName))
+              ? earlyLookups
+              : null;
+      earlyDeps = null;
+      earlyKey = null;
+      earlyLookups = null;
+      if (earlyGate != null) {
+        earlyGate.set(null);
+      }
+      earlyGate = null;
+    }
+    if (lookups == null) {
+      return ImmutableMap.of();
+    }
+    try (SilentCloseable c = Profiler.instance().profile("BuiltPackages.ask: early")) {
+      return lookups.get();
+    } catch (ExecutionException e) {
+      return ImmutableMap.of();
+    }
+  }
 
   /**
    * @param targets the top-level targets of the build
@@ -76,15 +205,14 @@ public final class BuiltPackages {
       Predicate<Label> willTest,
       RemoteAnalysisCacheReaderDepsProvider cachingDeps)
       throws InterruptedException {
+    String aspectsName = aspects.isEmpty() ? "" : aspects.get(0).getAspectsName();
+    // Taken whether or not it is used, so that nothing is kept for a later command.
+    Map<PackageIdentifier, ListenableFuture<RetrievalResult>> early =
+        takeEarly(context, aspectsName, cachingDeps);
     TopLevelAdmission admission = ExecutionValueCaching.topLevelAdmission();
-    if (admission == null
-        || !admission.withoutValues()
-        || !admission.byPackage()
-        || !cachingDeps.mode().isRetrievalEnabled()
-        || cachingDeps.getSkycacheAnalysisOnly()) {
+    if (!asks(admission, cachingDeps)) {
       return ImmutableSet.of();
     }
-    String aspectsName = aspects.isEmpty() ? "" : aspects.get(0).getAspectsName();
     var aspectsOf = new HashMap<ConfiguredTargetKey, TopLevelAspectsKey>();
     for (TopLevelAspectsKey key : aspects) {
       aspectsOf.put(key.getBaseConfiguredTargetKey(), key);
@@ -117,6 +245,10 @@ public final class BuiltPackages {
           packages.parallelStream()
               .map(
                   entry -> {
+                    ListenableFuture<RetrievalResult> asked = early.get(entry.getKey());
+                    if (asked != null) {
+                      return asked;
+                    }
                     try {
                       return SkyValueRetrieverUtils.retrieveDetached(
                           CompletedPackageKey.of(entry.getKey(), context, aspectsName),

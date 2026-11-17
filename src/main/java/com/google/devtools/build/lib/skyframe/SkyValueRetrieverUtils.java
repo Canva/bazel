@@ -170,6 +170,18 @@ public final class SkyValueRetrieverUtils {
   static ListenableFuture<RetrievalResult> retrieveDetached(
       SkyKey key, RemoteAnalysisCacheReaderDepsProvider analysisCachingDeps)
       throws InterruptedException {
+    return retrieveDetached(key, analysisCachingDeps, /* gate= */ null);
+  }
+
+  /**
+   * As above, but nothing that was received is read before {@code gate} is done: the key can be
+   * asked for before what reading its value needs is there.
+   */
+  static ListenableFuture<RetrievalResult> retrieveDetached(
+      SkyKey key,
+      RemoteAnalysisCacheReaderDepsProvider analysisCachingDeps,
+      @Nullable ListenableFuture<?> gate)
+      throws InterruptedException {
     SkyValueRetriever retriever = analysisCachingDeps.getSkyValueRetriever();
     RemoteAnalysisCacheClient client = analysisCachingDeps.getAnalysisCacheClient();
     if (retriever == null
@@ -177,7 +189,7 @@ public final class SkyValueRetrieverUtils {
         || analysisCachingDeps.shouldBailOutOnMissingFingerprint()) {
       return Futures.immediateFuture(new NoCachedData(MissReason.MISS_REASON_NOT_ATTEMPTED));
     }
-    DetachedRetrieval retrieval = new DetachedRetrieval(key, retriever, client);
+    DetachedRetrieval retrieval = new DetachedRetrieval(key, retriever, client, gate);
     retrieval.run();
     return retrieval.result;
   }
@@ -193,16 +205,23 @@ public final class SkyValueRetrieverUtils {
     /** What the step in progress waits for. Only one step runs at a time. */
     @Nullable private ListenableFuture<?> waitingFor;
 
+    /** What has to be done before anything received is read, or null. */
+    @Nullable private final ListenableFuture<?> gate;
+
     private DetachedRetrieval(
-        SkyKey key, SkyValueRetriever retriever, RemoteAnalysisCacheClient client) {
+        SkyKey key,
+        SkyValueRetriever retriever,
+        RemoteAnalysisCacheClient client,
+        @Nullable ListenableFuture<?> gate) {
       this.key = key;
       this.retriever = retriever;
       this.client = client;
+      this.gate = gate;
     }
 
     @Override
     public ObservedFutureStatus dependOnFuture(ListenableFuture<?> future) {
-      if (future.isDone()) {
+      if (future.isDone() && (gate == null || gate.isDone())) {
         return ObservedFutureStatus.DONE;
       }
       waitingFor = future;
@@ -224,7 +243,11 @@ public final class SkyValueRetrieverUtils {
           result.set(new NoCachedData(MissReason.MISS_REASON_UNSPECIFIED));
           return;
         }
-        next.addListener(this, ForkJoinPool.commonPool());
+        if (gate != null && !gate.isDone()) {
+          var unused = Futures.whenAllComplete(next, gate).run(this, ForkJoinPool.commonPool());
+        } else {
+          next.addListener(this, ForkJoinPool.commonPool());
+        }
       } catch (SerializationException | RuntimeException e) {
         result.set(new NoCachedData(MissReason.MISS_REASON_UNSPECIFIED));
       } catch (InterruptedException e) {
