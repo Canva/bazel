@@ -31,6 +31,7 @@ import build.bazel.remote.execution.v2.Digest;
 import build.bazel.remote.execution.v2.ServerCapabilities;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
+import com.google.common.collect.Sets;
 import com.google.common.flogger.GoogleLogger;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
@@ -109,6 +110,19 @@ public class CombinedCache extends AbstractReferenceCounted {
   @Nullable protected final DiskCacheClient diskCacheClient;
   @Nullable protected final String symlinkTemplate;
   private final DigestUtil digestUtil;
+
+  /**
+   * Digests of blobs that were downloaded to the local filesystem but are known to be in the
+   * remote CAS, because they're outputs of an action that ran remotely or hit the remote action
+   * cache.
+   *
+   * <p>Once downloaded, such a file looks local, so without this set the build event uploader would
+   * ask the remote cache about a blob it just served. A {@link CombinedCache} is created per
+   * command, so the set doesn't outlive a command (or a build event upload still in flight after
+   * it). This makes the same assumption about remote blob lifetime that's made for outputs that
+   * aren't downloaded at all.
+   */
+  private final Set<Digest> downloadedRemoteDigests = Sets.newConcurrentHashSet();
 
   static class Chunking {
     @Nullable private final ChunkingConfig config;
@@ -221,6 +235,22 @@ public class CombinedCache extends AbstractReferenceCounted {
 
   public DigestUtil digestUtil() {
     return digestUtil;
+  }
+
+  /**
+   * Records that the blob with {@code digest} was downloaded from an action result that came from
+   * remote execution or the remote action cache, so it's known to be in the remote CAS.
+   */
+  public void addDownloadedRemoteDigest(Digest digest) {
+    downloadedRemoteDigests.add(digest);
+  }
+
+  /**
+   * Returns whether the blob with {@code digest} was recorded with {@link
+   * #addDownloadedRemoteDigest} and is therefore known to be in the remote CAS.
+   */
+  public boolean isDownloadedRemoteDigest(Digest digest) {
+    return downloadedRemoteDigests.contains(digest);
   }
 
   public CacheCapabilities getRemoteCacheCapabilities() throws IOException {

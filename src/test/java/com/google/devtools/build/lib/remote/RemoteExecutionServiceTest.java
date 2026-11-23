@@ -161,6 +161,7 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.Random;
 import java.util.SortedMap;
+import java.util.function.Function;
 import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -969,6 +970,65 @@ public class RemoteExecutionServiceTest {
     assertThat(execRoot.getRelative("outputs/foo").isExecutable()).isFalse();
     assertThat(execRoot.getRelative("outputs/dir/bar").isExecutable()).isFalse();
     assertThat(context.isLockOutputFilesCalled()).isTrue();
+  }
+
+  @Test
+  public void downloadOutputs_remoteCacheHit_recordsDownloadedLogDigests() throws Exception {
+    assertDownloadedLogDigestsRecorded(
+        r -> RemoteActionResult.createFromCache(CachedActionResult.remote(r)),
+        /* expectRecorded= */ true);
+  }
+
+  @Test
+  public void downloadOutputs_remoteExecution_recordsDownloadedLogDigests() throws Exception {
+    assertDownloadedLogDigestsRecorded(
+        r ->
+            RemoteActionResult.createFromResponse(
+                ExecuteResponse.newBuilder().setResult(r).build()),
+        /* expectRecorded= */ true);
+  }
+
+  @Test
+  public void downloadOutputs_diskCacheHit_doesNotRecordDownloadedLogDigests() throws Exception {
+    // Blobs referenced by a disk cache entry may be missing from the remote cache.
+    assertDownloadedLogDigestsRecorded(
+        r -> RemoteActionResult.createFromCache(CachedActionResult.disk(r)),
+        /* expectRecorded= */ false);
+  }
+
+  private void assertDownloadedLogDigestsRecorded(
+      Function<ActionResult, RemoteActionResult> resultFactory, boolean expectRecorded)
+      throws Exception {
+    Digest testLogDigest = cache.addContents(remoteActionExecutionContext, "test log");
+    Digest outputDigest = cache.addContents(remoteActionExecutionContext, "output");
+    String testLogPath = "bazel-out/k8-fastbuild/testlogs/pkg/a_test/test.log";
+    String outputPath = "bazel-out/k8-fastbuild/bin/pkg/out";
+    RemoteActionResult result =
+        resultFactory.apply(
+            ActionResult.newBuilder()
+                .addOutputFiles(
+                    OutputFile.newBuilder().setPath(testLogPath).setDigest(testLogDigest))
+                .addOutputFiles(OutputFile.newBuilder().setPath(outputPath).setDigest(outputDigest))
+                .build());
+    ArtifactRoot bazelOutRoot = ArtifactRoot.asDerivedRoot(execRoot, RootType.OUTPUT, "bazel-out");
+    Spawn spawn =
+        newSpawn(
+            ImmutableMap.of(),
+            ImmutableSet.of(
+                ActionsTestUtil.createArtifact(bazelOutRoot, execRoot.getRelative(testLogPath)),
+                ActionsTestUtil.createArtifact(bazelOutRoot, execRoot.getRelative(outputPath))));
+    FakeSpawnExecutionContext context = newSpawnExecutionContext(spawn);
+    RemoteExecutionService service = newRemoteExecutionService();
+    RemoteAction action = service.buildRemoteAction(spawn, context);
+    when(remoteOutputChecker.shouldDownloadOutput(ArgumentMatchers.<PathFragment>any(), any()))
+        .thenReturn(true);
+
+    service.downloadOutputs(action, result);
+
+    assertThat(readContent(execRoot.getRelative(testLogPath), UTF_8)).isEqualTo("test log");
+    assertThat(cache.isDownloadedRemoteDigest(testLogDigest)).isEqualTo(expectRecorded);
+    // Only build and test logs are recorded.
+    assertThat(cache.isDownloadedRemoteDigest(outputDigest)).isFalse();
   }
 
   @Test
