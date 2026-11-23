@@ -274,9 +274,9 @@ class ByteStreamBuildEventArtifactUploader extends AbstractReferenceCounted
         digest,
         /* directory= */ false,
         /* symlink= */ false,
-        // A file downloaded from a remote action result is local now, but its contents (as just
+        // A log from a remote action result is a local file now, but its contents (as just
         // hashed) are known to be in the remote CAS, so it needn't be queried or uploaded.
-        isRemoteFile(path) || combinedCache.isDownloadedRemoteDigest(digest),
+        isRemoteFile(path) || combinedCache.isRemoteLogDigest(digest),
         isBuildToolLog,
         /* specialFile= */ false,
         digestFunction);

@@ -973,15 +973,15 @@ public class RemoteExecutionServiceTest {
   }
 
   @Test
-  public void downloadOutputs_remoteCacheHit_recordsDownloadedLogDigests() throws Exception {
-    assertDownloadedLogDigestsRecorded(
+  public void downloadOutputs_remoteCacheHit_recordsLogDigests() throws Exception {
+    assertLogDigestsRecorded(
         r -> RemoteActionResult.createFromCache(CachedActionResult.remote(r)),
         /* expectRecorded= */ true);
   }
 
   @Test
-  public void downloadOutputs_remoteExecution_recordsDownloadedLogDigests() throws Exception {
-    assertDownloadedLogDigestsRecorded(
+  public void downloadOutputs_remoteExecution_recordsLogDigests() throws Exception {
+    assertLogDigestsRecorded(
         r ->
             RemoteActionResult.createFromResponse(
                 ExecuteResponse.newBuilder().setResult(r).build()),
@@ -989,25 +989,30 @@ public class RemoteExecutionServiceTest {
   }
 
   @Test
-  public void downloadOutputs_diskCacheHit_doesNotRecordDownloadedLogDigests() throws Exception {
+  public void downloadOutputs_diskCacheHit_doesNotRecordLogDigests() throws Exception {
     // Blobs referenced by a disk cache entry may be missing from the remote cache.
-    assertDownloadedLogDigestsRecorded(
+    assertLogDigestsRecorded(
         r -> RemoteActionResult.createFromCache(CachedActionResult.disk(r)),
         /* expectRecorded= */ false);
   }
 
-  private void assertDownloadedLogDigestsRecorded(
+  private void assertLogDigestsRecorded(
       Function<ActionResult, RemoteActionResult> resultFactory, boolean expectRecorded)
       throws Exception {
-    Digest testLogDigest = cache.addContents(remoteActionExecutionContext, "test log");
+    // A test action's test.log is its stdout, while its test.xml is an output file.
+    Digest stdoutDigest = cache.addContents(remoteActionExecutionContext, "stdout");
+    Digest stderrDigest = cache.addContents(remoteActionExecutionContext, "stderr");
+    Digest testXmlDigest = cache.addContents(remoteActionExecutionContext, "test xml");
     Digest outputDigest = cache.addContents(remoteActionExecutionContext, "output");
-    String testLogPath = "bazel-out/k8-fastbuild/testlogs/pkg/a_test/test.log";
+    String testXmlPath = "bazel-out/k8-fastbuild/testlogs/pkg/a_test/test.xml";
     String outputPath = "bazel-out/k8-fastbuild/bin/pkg/out";
     RemoteActionResult result =
         resultFactory.apply(
             ActionResult.newBuilder()
+                .setStdoutDigest(stdoutDigest)
+                .setStderrDigest(stderrDigest)
                 .addOutputFiles(
-                    OutputFile.newBuilder().setPath(testLogPath).setDigest(testLogDigest))
+                    OutputFile.newBuilder().setPath(testXmlPath).setDigest(testXmlDigest))
                 .addOutputFiles(OutputFile.newBuilder().setPath(outputPath).setDigest(outputDigest))
                 .build());
     ArtifactRoot bazelOutRoot = ArtifactRoot.asDerivedRoot(execRoot, RootType.OUTPUT, "bazel-out");
@@ -1015,7 +1020,7 @@ public class RemoteExecutionServiceTest {
         newSpawn(
             ImmutableMap.of(),
             ImmutableSet.of(
-                ActionsTestUtil.createArtifact(bazelOutRoot, execRoot.getRelative(testLogPath)),
+                ActionsTestUtil.createArtifact(bazelOutRoot, execRoot.getRelative(testXmlPath)),
                 ActionsTestUtil.createArtifact(bazelOutRoot, execRoot.getRelative(outputPath))));
     FakeSpawnExecutionContext context = newSpawnExecutionContext(spawn);
     RemoteExecutionService service = newRemoteExecutionService();
@@ -1025,10 +1030,12 @@ public class RemoteExecutionServiceTest {
 
     service.downloadOutputs(action, result);
 
-    assertThat(readContent(execRoot.getRelative(testLogPath), UTF_8)).isEqualTo("test log");
-    assertThat(cache.isDownloadedRemoteDigest(testLogDigest)).isEqualTo(expectRecorded);
-    // Only build and test logs are recorded.
-    assertThat(cache.isDownloadedRemoteDigest(outputDigest)).isFalse();
+    assertThat(readContent(execRoot.getRelative(testXmlPath), UTF_8)).isEqualTo("test xml");
+    assertThat(cache.isRemoteLogDigest(stdoutDigest)).isEqualTo(expectRecorded);
+    assertThat(cache.isRemoteLogDigest(stderrDigest)).isEqualTo(expectRecorded);
+    assertThat(cache.isRemoteLogDigest(testXmlDigest)).isEqualTo(expectRecorded);
+    // Of the output files, only build and test logs are recorded.
+    assertThat(cache.isRemoteLogDigest(outputDigest)).isFalse();
   }
 
   @Test

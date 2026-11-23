@@ -112,17 +112,16 @@ public class CombinedCache extends AbstractReferenceCounted {
   private final DigestUtil digestUtil;
 
   /**
-   * Digests of blobs that were downloaded to the local filesystem but are known to be in the
-   * remote CAS, because they're outputs of an action that ran remotely or hit the remote action
-   * cache.
+   * Digests of build and test logs that are known to be in the remote CAS, because they're
+   * referenced by the result of an action that ran remotely or hit the remote action cache.
    *
-   * <p>Once downloaded, such a file looks local, so without this set the build event uploader would
-   * ask the remote cache about a blob it just served. A {@link CombinedCache} is created per
-   * command, so the set doesn't outlive a command (or a build event upload still in flight after
-   * it). This makes the same assumption about remote blob lifetime that's made for outputs that
-   * aren't downloaded at all.
+   * <p>Such a log ends up on the local filesystem, where it looks like any other local file, so
+   * without this set the build event uploader would ask the remote cache about a blob that came
+   * from it. A {@link CombinedCache} is created per command, so the set doesn't outlive a command
+   * (or a build event upload still in flight after it). This makes the same assumption about
+   * remote blob lifetime that's made for outputs that aren't downloaded at all.
    */
-  private final Set<Digest> downloadedRemoteDigests = Sets.newConcurrentHashSet();
+  private final Set<Digest> remoteLogDigests = Sets.newConcurrentHashSet();
 
   static class Chunking {
     @Nullable private final ChunkingConfig config;
@@ -238,19 +237,19 @@ public class CombinedCache extends AbstractReferenceCounted {
   }
 
   /**
-   * Records that the blob with {@code digest} was downloaded from an action result that came from
-   * remote execution or the remote action cache, so it's known to be in the remote CAS.
+   * Records that the build or test log with {@code digest} is referenced by an action result that
+   * came from remote execution or the remote action cache, so it's known to be in the remote CAS.
    */
-  public void addDownloadedRemoteDigest(Digest digest) {
-    downloadedRemoteDigests.add(digest);
+  public void addRemoteLogDigest(Digest digest) {
+    remoteLogDigests.add(digest);
   }
 
   /**
-   * Returns whether the blob with {@code digest} was recorded with {@link
-   * #addDownloadedRemoteDigest} and is therefore known to be in the remote CAS.
+   * Returns whether {@code digest} was recorded with {@link #addRemoteLogDigest} and the blob is
+   * therefore known to be in the remote CAS.
    */
-  public boolean isDownloadedRemoteDigest(Digest digest) {
-    return downloadedRemoteDigests.contains(digest);
+  public boolean isRemoteLogDigest(Digest digest) {
+    return remoteLogDigests.contains(digest);
   }
 
   public CacheCapabilities getRemoteCacheCapabilities() throws IOException {
@@ -275,12 +274,15 @@ public class CombinedCache extends AbstractReferenceCounted {
    * Class to keep track of which cache (disk or remote) a given [cached] ActionResult comes from.
    */
   public record CachedActionResult(ActionResult actionResult, String cacheName) {
+    static final String REMOTE_CACHE_NAME = "remote";
+    static final String DISK_CACHE_NAME = "disk";
+
     @Nullable
     public static CachedActionResult remote(ActionResult actionResult) {
       if (actionResult == null) {
         return null;
       }
-      return new CachedActionResult(actionResult, "remote");
+      return new CachedActionResult(actionResult, REMOTE_CACHE_NAME);
     }
 
     @Nullable
@@ -288,7 +290,7 @@ public class CombinedCache extends AbstractReferenceCounted {
       if (actionResult == null) {
         return null;
       }
-      return new CachedActionResult(actionResult, "disk");
+      return new CachedActionResult(actionResult, DISK_CACHE_NAME);
     }
   }
 
